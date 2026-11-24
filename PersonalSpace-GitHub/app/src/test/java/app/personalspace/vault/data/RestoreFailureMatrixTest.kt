@@ -179,7 +179,7 @@ class RestoreFailureMatrixTest {
         FailureInjection.arm(stage) { IllegalStateException("P9 injected failure at $stage") }
 
         val outcome = runCatching {
-            rig.backupManager.restoreFromBackupFile(incoming, PASSWORD.toCharArray(), requireSafetyBackup = false)
+            rig.backupManager.restoreFromBackupFile(incoming, PASSWORD.toCharArray())
         }
         FailureInjection.disarm()
         val error = outcome.exceptionOrNull()
@@ -216,7 +216,7 @@ class RestoreFailureMatrixTest {
             !gateBlocked || RecoveryGate.state().phase == RecoveryGate.Phase.PENDING)
 
         // and a retry of the very same restore must now succeed
-        val retry = rig.backupManager.restoreFromBackupFile(incoming, PASSWORD.toCharArray(), requireSafetyBackup = false)
+        val retry = rig.backupManager.restoreFromBackupFile(incoming, PASSWORD.toCharArray())
         note("[$stage] retry verified=${retry.verified} notes=${retry.notes}")
         assertTrue("[$stage] the retry must succeed", retry.verified)
         assertTrue("[$stage] the incoming note must be installed",
@@ -333,7 +333,7 @@ class RestoreFailureMatrixTest {
             IllegalStateException("P9 injected failure at $STAGE_POST_COMMIT_CLEANUP")
         }
         val outcome = runCatching {
-            rig.backupManager.restoreFromBackupFile(incoming, PASSWORD.toCharArray(), requireSafetyBackup = false)
+            rig.backupManager.restoreFromBackupFile(incoming, PASSWORD.toCharArray())
         }
         FailureInjection.disarm()
         note("post-commit cleanup failure -> ${outcome.exceptionOrNull()?.message?.take(90)}")
@@ -376,7 +376,7 @@ class RestoreFailureMatrixTest {
             java.io.IOException("P9 injected failure at $STAGE_ROLLBACK")
         }
         val outcome = runCatching {
-            rig.backupManager.restoreFromBackupFile(incoming, PASSWORD.toCharArray(), requireSafetyBackup = false)
+            rig.backupManager.restoreFromBackupFile(incoming, PASSWORD.toCharArray())
         }
         FailureInjection.disarm()
         val error = outcome.exceptionOrNull()
@@ -463,7 +463,7 @@ class RestoreFailureMatrixTest {
         val current = seedCurrentVault()
         FailureInjection.disarm()
         FailureInjection.resetCoverage()
-        rig.backupManager.restoreFromBackupFile(current, PASSWORD.toCharArray(), requireSafetyBackup = false)
+        rig.backupManager.restoreFromBackupFile(current, PASSWORD.toCharArray())
         val expected = listOf(
             STAGE_GUARD_CLEARED, STAGE_INSPECTION, STAGE_VALIDATED, STAGE_KEYS_UNLOCKED,
             STAGE_MANIFEST_HMAC, STAGE_SNAPSHOT_DECRYPTED, STAGE_RELATIONSHIPS,
