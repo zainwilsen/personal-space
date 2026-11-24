@@ -895,7 +895,16 @@ fun RestoreBackupScreen(
 
     var showConfirm by remember { mutableStateOf(false) }
     var pendingFileUri by remember { mutableStateOf<Uri?>(null) }
+    var pendingDriveFileId by remember { mutableStateOf<String?>(null) }
     val driveConnected = viewModel.isDriveConnected()
+
+    val consentLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            viewModel.handleDriveConsentResult(result.data)
+        }
+    }
 
     val picker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -964,30 +973,54 @@ fun RestoreBackupScreen(
                 )
             }
 
-            if (driveConnected) {
-                BauhausSurfaceCard {
-                    Text("Drive se restore", style = MaterialTheme.typography.titleMedium)
-                    Spacer(modifier = Modifier.height(4.dp))
+            BauhausSurfaceCard {
+                Text("Google Drive", style = MaterialTheme.typography.titleMedium)
+                Spacer(modifier = Modifier.height(4.dp))
+                if (driveConnected) {
                     Text(
-                        if (driveBackups.isNullOrEmpty()) "Drive par backup nahi mila."
-                        else "Backup: " +
-                            DateFormatters.formatDateTime(driveBackups!!.first().createdMillis) +
-                            " · " + DateFormatters.formatBytes(driveBackups!!.first().sizeBytes),
+                        if (driveBackups.isNullOrEmpty()) {
+                            "Connected account par backup nahi mila, ya backup list load ho rahi hai."
+                        } else {
+                            "Latest backup: " +
+                                DateFormatters.formatDateTime(driveBackups!!.first().createdMillis) +
+                                " · " + DateFormatters.formatBytes(driveBackups!!.first().sizeBytes)
+                        },
                         style = MaterialTheme.typography.bodyMedium,
                         color = BauhausColors.SecondaryText
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     BauhausOutlinedButton(
-                        text = if (!driveBackups.isNullOrEmpty()) "Restore from Drive" else "Refresh",
+                        text = if (!driveBackups.isNullOrEmpty()) "Choose Latest Drive Backup" else "Refresh Drive Backups",
                         onClick = {
-                            if (!driveBackups.isNullOrEmpty()) {
-                                showConfirm = false
+                            val latestId = driveBackups?.firstOrNull()?.fileId
+                            if (latestId != null) {
                                 pendingFileUri = null
-                                viewModel.restoreFromDriveBackup(driveBackups!!.first().fileId, onRestored)
+                                pendingDriveFileId = latestId
+                                showConfirm = true
                             } else {
                                 viewModel.loadDriveBackups()
                             }
                         },
+                        enabled = !busy,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                } else {
+                    Text(
+                        "Purane backup ko Google Drive se restore karne ke liye apna Google account connect karo.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = BauhausColors.SecondaryText
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    BauhausPrimaryButton(
+                        text = "Connect Google Account",
+                        onClick = {
+                            viewModel.connectDrive { pendingIntent ->
+                                consentLauncher.launch(
+                                    IntentSenderRequest.Builder(pendingIntent).build()
+                                )
+                            }
+                        },
+                        enabled = !busy,
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
@@ -995,10 +1028,10 @@ fun RestoreBackupScreen(
 
             BauhausSurfaceCard {
                 Text(
-                    "Restore se pehle app aapke current data ka safety backup banata hai. Agar safety " +
-                        "backup fail ho jaye to restore shuru hi nahi hota. Notes, folders, attachments, " +
-                        "version history, drafts aur note editor ki images — sab restore hote hain, aur " +
-                        "restore ke baad counts verify hote hain.",
+                    "Restore selected backup se current local notes, folders aur files replace karega. " +
+                        "Successful restore ke baad purana local data alag se available nahi rahega. " +
+                        "Restore ke beech failure ya app close hone par temporary rollback journal " +
+                        "pichhla data wapas laane ki koshish karta hai.",
                     style = MaterialTheme.typography.labelSmall,
                     color = BauhausColors.SecondaryText
                 )
@@ -1008,13 +1041,18 @@ fun RestoreBackupScreen(
 
     if (showConfirm) {
         AlertDialog(
-            onDismissRequest = { showConfirm = false; pendingFileUri = null },
+            onDismissRequest = {
+                showConfirm = false
+                pendingFileUri = null
+                pendingDriveFileId = null
+            },
             containerColor = BauhausColors.CardSurface,
-            title = { Text("Restore karna hai?", style = MaterialTheme.typography.headlineMedium) },
+            title = { Text("Replace current space?", style = MaterialTheme.typography.headlineMedium) },
             text = {
                 Text(
-                    "This will replace all current local vault data with the selected backup. " +
-                        "Your current data will first be protected by a safety backup.",
+                    "Selected backup current local data ko replace karega. Successful restore ke baad " +
+                        "old local data alag se recover nahi kiya ja sakega. Continue karne se pehle " +
+                        "zaroori data ka separate backup rakh lo.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = BauhausColors.SecondaryText
                 )
@@ -1024,17 +1062,25 @@ fun RestoreBackupScreen(
                     onClick = {
                         showConfirm = false
                         val uri = pendingFileUri
+                        val driveFileId = pendingDriveFileId
                         pendingFileUri = null
-                        if (uri != null) {
-                            viewModel.restoreFromLocalUri(uri, onRestored)
-                        } else {
-                            viewModel.restoreFromLatestLocalBackup(onRestored)
+                        pendingDriveFileId = null
+                        when {
+                            driveFileId != null -> viewModel.restoreFromDriveBackup(driveFileId, onRestored)
+                            uri != null -> viewModel.restoreFromLocalUri(uri, onRestored)
+                            else -> viewModel.restoreFromLatestLocalBackup(onRestored)
                         }
                     }
                 ) { Text("Restore", color = BauhausColors.Red) }
             },
             dismissButton = {
-                TextButton(onClick = { showConfirm = false; pendingFileUri = null }) {
+                TextButton(
+                    onClick = {
+                        showConfirm = false
+                        pendingFileUri = null
+                        pendingDriveFileId = null
+                    }
+                ) {
                     Text("Cancel", color = BauhausColors.Black)
                 }
             }
