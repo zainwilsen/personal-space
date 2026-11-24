@@ -135,6 +135,9 @@ class SettingsViewModel @Inject constructor(
     private val _driveBackups = MutableStateFlow<List<DriveBackupFile>?>(null)
     val driveBackups: StateFlow<List<DriveBackupFile>?> = _driveBackups.asStateFlow()
 
+    private val _driveConnected = MutableStateFlow(driveAuthManager.isConnected())
+    val driveConnected: StateFlow<Boolean> = _driveConnected.asStateFlow()
+
     private val _isLoadingDriveBackups = MutableStateFlow(false)
     val isLoadingDriveBackups: StateFlow<Boolean> = _isLoadingDriveBackups.asStateFlow()
 
@@ -436,23 +439,27 @@ class SettingsViewModel @Inject constructor(
     }
 
     fun loadDriveBackups() {
-        if (!driveAuthManager.isConnected()) {
+        val connected = driveAuthManager.isConnected()
+        _driveConnected.value = connected
+        if (!connected) {
+            _isLoadingDriveBackups.value = false
             _driveBackups.value = emptyList()
             return
         }
+        if (_isLoadingDriveBackups.value) return
+
         viewModelScope.launch {
             _isLoadingDriveBackups.value = true
             runCatching { repository.listDriveBackups() }
                 .onSuccess {
-                    _isLoadingDriveBackups.value = false
                     _driveBackups.value = it
                     markConnected(it.firstOrNull())
                 }
                 .onFailure {
-                    _isLoadingDriveBackups.value = false
                     _driveBackups.value = emptyList()
                     _error.value = it.message ?: "Drive backups load nahi ho paye."
                 }
+            _isLoadingDriveBackups.value = false
         }
     }
 
@@ -471,7 +478,11 @@ class SettingsViewModel @Inject constructor(
 
     fun refreshCloudState() {
         val session = driveAuthManager.getCurrentSession()
-        if (session == null || session.accessToken.isBlank()) {
+        val connected = session != null && session.accessToken.isNotBlank()
+        _driveConnected.value = connected
+        if (!connected) {
+            _isLoadingDriveBackups.value = false
+            _driveBackups.value = emptyList()
             _cloudBackup.value = CloudBackupState(status = BackupStatus.NOT_CONNECTED)
             return
         }
@@ -646,6 +657,8 @@ class SettingsViewModel @Inject constructor(
             clearFeedback()
             when (val res = driveAuthManager.requestDriveAuthorization()) {
                 is DriveAuthOutcome.Authorized -> {
+                    _driveConnected.value = true
+                    _driveBackups.value = null
                     _isBusy.value = false
                     _message.value = "Google account connected."
                     refreshCloudState()
@@ -665,6 +678,8 @@ class SettingsViewModel @Inject constructor(
     fun handleDriveConsentResult(data: Intent?) {
         when (val res = driveAuthManager.handleConsentResult(data)) {
             is DriveAuthOutcome.Authorized -> {
+                _driveConnected.value = true
+                _driveBackups.value = null
                 _message.value = "Google account connected."
                 refreshCloudState()
             }
@@ -675,6 +690,7 @@ class SettingsViewModel @Inject constructor(
 
     fun disconnectDrive() {
         driveAuthManager.disconnect()
+        _driveConnected.value = false
         _cloudBackup.value = CloudBackupState(status = BackupStatus.NOT_CONNECTED)
         _driveBackups.value = emptyList()
         _message.value = "Google account disconnected. Local vault remains fully operational."

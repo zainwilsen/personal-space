@@ -890,13 +890,13 @@ fun RestoreBackupScreen(
     val msg by viewModel.message.collectAsStateWithLifecycle()
     val err by viewModel.error.collectAsStateWithLifecycle()
     val busy by viewModel.isBusy.collectAsStateWithLifecycle()
-    val localInfo by viewModel.localBackupInfo.collectAsStateWithLifecycle()
     val driveBackups by viewModel.driveBackups.collectAsStateWithLifecycle()
+    val driveConnected by viewModel.driveConnected.collectAsStateWithLifecycle()
+    val isLoadingDriveBackups by viewModel.isLoadingDriveBackups.collectAsStateWithLifecycle()
 
     var showConfirm by remember { mutableStateOf(false) }
     var pendingFileUri by remember { mutableStateOf<Uri?>(null) }
     var pendingDriveFileId by remember { mutableStateOf<String?>(null) }
-    val driveConnected = viewModel.isDriveConnected()
 
     val consentLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartIntentSenderForResult()
@@ -916,11 +916,14 @@ fun RestoreBackupScreen(
     }
 
     LaunchedEffect(Unit) {
-        viewModel.refreshLocalBackupInfo()
         if (driveConnected) viewModel.loadDriveBackups()
     }
 
-    BauhausScreenScaffold(title = "Restore Backup", onBack = onBack) { innerPadding ->
+    BauhausScreenScaffold(
+        title = "Restore Backup",
+        titleStyle = MaterialTheme.typography.headlineSmall,
+        onBack = onBack
+    ) { innerPadding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -934,18 +937,7 @@ fun RestoreBackupScreen(
             msg?.let { BauhausSurfaceCard { Text(it, color = BauhausColors.Blue) } }
 
             BauhausSurfaceCard(elevated = true) {
-                Text("RESTORE", style = MaterialTheme.typography.labelMedium)
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    if (localInfo.exists) {
-                        "Phone backup: " + DateFormatters.formatDateTime(localInfo.modifiedMillis) +
-                            " · " + DateFormatters.formatBytes(localInfo.sizeBytes)
-                    } else {
-                        "Phone me koi local backup nahi mila."
-                    },
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = BauhausColors.SecondaryText
-                )
+                Text("LOCAL", style = MaterialTheme.typography.titleMedium)
                 Spacer(modifier = Modifier.height(10.dp))
                 if (busy) {
                     Row(
@@ -963,34 +955,34 @@ fun RestoreBackupScreen(
                 BauhausOutlinedButton(
                     text = "Choose Backup File",
                     onClick = { picker.launch(arrayOf("*/*")) },
+                    enabled = !busy,
                     modifier = Modifier.fillMaxWidth()
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    "Restore purana data replace karta hai — backup wala vault hi bachega.",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = BauhausColors.SecondaryText
                 )
             }
 
             BauhausSurfaceCard {
                 Text("Google Drive", style = MaterialTheme.typography.titleMedium)
-                Spacer(modifier = Modifier.height(4.dp))
+                Spacer(modifier = Modifier.height(10.dp))
                 if (driveConnected) {
-                    Text(
-                        if (driveBackups.isNullOrEmpty()) {
-                            "Connected account par backup nahi mila, ya backup list load ho rahi hai."
-                        } else {
-                            "Latest backup: " +
-                                DateFormatters.formatDateTime(driveBackups!!.first().createdMillis) +
-                                " · " + DateFormatters.formatBytes(driveBackups!!.first().sizeBytes)
-                        },
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = BauhausColors.SecondaryText
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
+                    if (isLoadingDriveBackups) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                color = BauhausColors.Red,
+                                strokeWidth = 2.dp
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
                     BauhausOutlinedButton(
-                        text = if (!driveBackups.isNullOrEmpty()) "Choose Latest Drive Backup" else "Refresh Drive Backups",
+                        text = if (!driveBackups.isNullOrEmpty()) {
+                            "Choose Latest Drive Backup"
+                        } else {
+                            "Refresh Drive Backups"
+                        },
                         onClick = {
                             val latestId = driveBackups?.firstOrNull()?.fileId
                             if (latestId != null) {
@@ -1001,16 +993,10 @@ fun RestoreBackupScreen(
                                 viewModel.loadDriveBackups()
                             }
                         },
-                        enabled = !busy,
+                        enabled = !busy && !isLoadingDriveBackups,
                         modifier = Modifier.fillMaxWidth()
                     )
                 } else {
-                    Text(
-                        "Purane backup ko Google Drive se restore karne ke liye apna Google account connect karo.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = BauhausColors.SecondaryText
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
                     BauhausPrimaryButton(
                         text = "Connect Google Account",
                         onClick = {
@@ -1024,17 +1010,6 @@ fun RestoreBackupScreen(
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
-            }
-
-            BauhausSurfaceCard {
-                Text(
-                    "Restore selected backup se current local notes, folders aur files replace karega. " +
-                        "Successful restore ke baad purana local data alag se available nahi rahega. " +
-                        "Restore ke beech failure ya app close hone par temporary rollback journal " +
-                        "pichhla data wapas laane ki koshish karta hai.",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = BauhausColors.SecondaryText
-                )
             }
         }
     }
