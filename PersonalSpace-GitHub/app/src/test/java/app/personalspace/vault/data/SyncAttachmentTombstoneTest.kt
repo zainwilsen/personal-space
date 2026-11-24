@@ -65,6 +65,50 @@ class SyncAttachmentTombstoneTest {
     }
 
     @Test
+    fun `new sync bundles and attachment blobs stay in hidden appDataFolder while legacy visible bundles remain readable`() {
+        kotlinx.coroutines.runBlocking {
+            joinBoth("PrivateSync#2026")
+
+            val rec = deviceA.repository.saveRecord(
+                null, "Private sync note", "first change", null, null, emptyList()
+            )
+            val att = deviceA.repository.importAttachmentFromStream(
+                rec.id, "PRIVATE-ATTACHMENT".toByteArray().inputStream(),
+                "private.txt", "text/plain"
+            )
+            val firstReport = deviceA.repository.runSyncNow()
+            assertNull(firstReport.errorMessage)
+
+            val firstPrivateFiles = sharedCloud.listAppDataFiles("token-a", null)
+            assertTrue(firstPrivateFiles.any { it.name.endsWith(".psbundle") })
+            assertTrue(firstPrivateFiles.any { it.name == "psatt_${att.id}.psenc" })
+            assertTrue(
+                "New sync payloads must not be written into the visible legacy Drive folder",
+                sharedCloud.listFilesInFolder("token-a", "drive-vault-folder-001").isEmpty()
+            )
+
+            deviceA.repository.saveRecord(
+                null, "Second sync note", "second change", null, null, emptyList()
+            )
+            val secondReport = deviceA.repository.runSyncNow()
+            assertNull(secondReport.errorMessage)
+
+            val privateBundles = sharedCloud.listAppDataFiles("token-a", "psbundle_")
+                .filter { it.name.endsWith(".psbundle") }
+            assertEquals(
+                "Sync events remain append-only so an offline device can replay all changes",
+                2,
+                privateBundles.size
+            )
+            assertTrue(
+                "No newly generated bundle should be exposed in My Drive",
+                sharedCloud.listFilesInFolder("token-a", "drive-vault-folder-001")
+                    .none { it.name.endsWith(".psbundle") || it.name.startsWith("psatt_") }
+            )
+        }
+    }
+
+    @Test
     fun `S1 a remote attachment deletion is recoverable from the Recycle Bin on this device`() {
         kotlinx.coroutines.runBlocking {
             val password = "SyncTomb#2026"
