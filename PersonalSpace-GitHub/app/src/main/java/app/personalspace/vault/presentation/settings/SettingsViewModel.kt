@@ -327,7 +327,7 @@ class SettingsViewModel @Inject constructor(
             _cloudBackup.value = _cloudBackup.value.copy(status = BackupStatus.RESTORE_IN_PROGRESS)
             runCatching {
                 withContext(Dispatchers.Default) {
-                    backupPackageManager.restoreFromBackupFile(backupFile = file, requireSafetyBackup = true)
+                    backupPackageManager.restoreFromBackupFile(backupFile = file)
                 }
             }
                 .onSuccess {
@@ -358,7 +358,6 @@ class SettingsViewModel @Inject constructor(
                 val result = withContext(Dispatchers.Default) {
                     backupPackageManager.restoreFromBackupFile(
                         backupFile = temp,
-                        requireSafetyBackup = true
                     )
                 }
                 _isBusy.value = false
