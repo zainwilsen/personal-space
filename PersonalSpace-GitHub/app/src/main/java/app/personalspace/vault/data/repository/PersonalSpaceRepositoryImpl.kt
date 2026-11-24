@@ -2173,8 +2173,7 @@ class PersonalSpaceRepositoryImpl @Inject constructor(
                 remoteDataSource.downloadEncryptedFile(token, fileId, temp)
                 backupManager.restoreFromBackupFile(
                     backupFile = temp,
-                    recoveryPassword = recoveryPassword?.copyOf(),
-                    requireSafetyBackup = true
+                    recoveryPassword = recoveryPassword?.copyOf()
                 )
             } finally {
                 temp.delete()
