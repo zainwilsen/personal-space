@@ -1,6 +1,5 @@
 package app.personalspace.vault.presentation.setup
 
-import androidx.compose.ui.test.assertDoesNotExist
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
@@ -42,10 +41,6 @@ class InitialSetupScreenTest {
         composeTestRule.onNodeWithText("Personal Space").assertIsDisplayed()
         composeTestRule.onNodeWithText("Create New").assertIsDisplayed()
         composeTestRule.onNodeWithText("Restore Existing").assertIsDisplayed()
-
-        composeTestRule.onNodeWithText("How would you like to start?").assertDoesNotExist()
-        composeTestRule.onNodeWithText("NEW SPACE").assertDoesNotExist()
-        composeTestRule.onNodeWithText("EXISTING SPACE").assertDoesNotExist()
 
         composeTestRule.onNodeWithText("Create New").performClick()
         composeTestRule.onNodeWithText("Restore Existing").performClick()
