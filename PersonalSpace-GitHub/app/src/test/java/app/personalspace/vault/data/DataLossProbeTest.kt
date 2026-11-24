@@ -49,7 +49,7 @@ class DataLossProbeTest {
             // restore into a fresh install
             val rigB = IsolatedVaultTestRig(ApplicationProvider.getApplicationContext(), "dl_b", clock = rig.clock)
             rigB.joinExistingVaultEnvelope(rig.vaultKeyManager.readEnvelopeBundle()!!, "ProbePass#2026")
-            rigB.backupManager.restoreFromBackupFile(out.file, requireSafetyBackup = false)
+            rigB.backupManager.restoreFromBackupFile(out.file)
             val r2 = rigB.dbHolder.getDatabase().recordDao().getRecordById(rec.id)
             note("restored note present=${r2 != null} isDeleted=${r2?.isDeleted}")
             note("restored image on disk = ${rigB.inlineImageStore.exists(img)}")

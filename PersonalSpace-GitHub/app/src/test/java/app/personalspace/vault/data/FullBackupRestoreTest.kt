@@ -91,7 +91,7 @@ class FullBackupRestoreTest {
 
         target.initializeAndUnlockVault("TargetPass!2")
         note(target, "Local only note")
-        val result = target.backupManager.restoreFromBackupFile(file, requireSafetyBackup = true)
+        val result = target.backupManager.restoreFromBackupFile(file)
 
         assertEquals(0, result.notes)
         assertEquals(0, target.repository.observeAllRecords().first().size)
@@ -106,7 +106,7 @@ class FullBackupRestoreTest {
         val file = backup(source)
 
         target.initializeAndUnlockVault("TargetPass!2")
-        val result = target.backupManager.restoreFromBackupFile(file, requireSafetyBackup = true)
+        val result = target.backupManager.restoreFromBackupFile(file)
 
         assertEquals(1, result.notes)
         val restored = target.repository.observeAllRecords().first()
@@ -167,7 +167,7 @@ class FullBackupRestoreTest {
         val file = backup(source)
 
         target.initializeAndUnlockVault("TargetPass!2")
-        val result = target.backupManager.restoreFromBackupFile(file, requireSafetyBackup = true)
+        val result = target.backupManager.restoreFromBackupFile(file)
 
         assertEquals(1000, result.notes)
         assertEquals(1000, target.repository.observeAllRecords().first().size)
@@ -190,7 +190,7 @@ class FullBackupRestoreTest {
         val file = backup(source)
 
         target.initializeAndUnlockVault("TargetPass!2")
-        target.backupManager.restoreFromBackupFile(file, requireSafetyBackup = true)
+        target.backupManager.restoreFromBackupFile(file)
 
         val restored = target.repository.observeAllRecords().first().single()
         assertEquals("Lamaba description with newlines", restored.description)
@@ -210,7 +210,7 @@ class FullBackupRestoreTest {
         val file = backup(source)
 
         target.initializeAndUnlockVault("TargetPass!2")
-        val result = target.backupManager.restoreFromBackupFile(file, requireSafetyBackup = true)
+        val result = target.backupManager.restoreFromBackupFile(file)
 
         assertEquals(1, result.attachments)
         val restoredAttachments = target.repository.observeAttachmentsForRecord(rec.id).first()
@@ -238,7 +238,7 @@ class FullBackupRestoreTest {
         val file = backup(source)
 
         target.initializeAndUnlockVault("TargetPass!2")
-        val result = target.backupManager.restoreFromBackupFile(file, requireSafetyBackup = true)
+        val result = target.backupManager.restoreFromBackupFile(file)
 
         assertEquals(sourceVersions.size, result.versions)
         val restoredVersions = target.repository.observeRecordVersions(rec.id).first()
@@ -255,7 +255,7 @@ class FullBackupRestoreTest {
         val file = backup(source)
 
         target.initializeAndUnlockVault("TargetPass!2")
-        val result = target.backupManager.restoreFromBackupFile(file, requireSafetyBackup = true)
+        val result = target.backupManager.restoreFromBackupFile(file)
 
         assertEquals(2, result.folders)
         val folders = target.repository.observeAllFolders().first()
@@ -285,7 +285,7 @@ class FullBackupRestoreTest {
         val file = backup(source)
 
         target.initializeAndUnlockVault("TargetPass!2")
-        val result = target.backupManager.restoreFromBackupFile(file, requireSafetyBackup = true)
+        val result = target.backupManager.restoreFromBackupFile(file)
 
         assertEquals(1, result.drafts)
         val restoredDraft = target.repository.getDraft("draft-1")
@@ -304,7 +304,7 @@ class FullBackupRestoreTest {
         val file = backup(source)
 
         target.initializeAndUnlockVault("TargetPass!2")
-        target.backupManager.restoreFromBackupFile(file, requireSafetyBackup = true)
+        target.backupManager.restoreFromBackupFile(file)
 
         val restoredBin = target.repository.observeDeletedItems().first()
         assertEquals(sourceBin.size, restoredBin.size)
@@ -323,7 +323,7 @@ class FullBackupRestoreTest {
         note(target, "Stale note B")
         assertEquals(2, target.repository.observeAllRecords().first().size)
 
-        target.backupManager.restoreFromBackupFile(file, requireSafetyBackup = true)
+        target.backupManager.restoreFromBackupFile(file)
 
         val restored = target.repository.observeAllRecords().first()
         assertEquals(1, restored.size)
@@ -347,7 +347,7 @@ class FullBackupRestoreTest {
         )
         assertEquals(1, target.repository.observeAllRecords().first().size)
 
-        target.backupManager.restoreFromBackupFile(file, requireSafetyBackup = true)
+        target.backupManager.restoreFromBackupFile(file)
 
         assertEquals(1, target.repository.observeAllRecords().first().size)
         assertEquals(0, target.repository.observeAttachmentsForRecord(staleNote.id).first().size)
@@ -367,8 +367,7 @@ class FullBackupRestoreTest {
         try {
             target.backupManager.restoreFromBackupFile(
                 backupFile = file,
-                masterPassword = "WrongPassword!999".toCharArray(),
-                requireSafetyBackup = true
+                masterPassword = "WrongPassword!999".toCharArray()
             )
             fail("Expected CryptoAuthException")
         } catch (_: CryptoAuthException) {
@@ -388,7 +387,7 @@ class FullBackupRestoreTest {
         target.initializeAndUnlockVault("TargetPass!2")
         note(target, "Target keeps this")
         try {
-            target.backupManager.restoreFromBackupFile(corrupt, requireSafetyBackup = true)
+            target.backupManager.restoreFromBackupFile(corrupt)
             fail("Expected CorruptedBackupException")
         } catch (_: CorruptedBackupException) {
         }
@@ -430,7 +429,7 @@ class FullBackupRestoreTest {
         )
 
         try {
-            target.backupManager.restoreFromBackupFile(tampered, requireSafetyBackup = true)
+            target.backupManager.restoreFromBackupFile(tampered)
             fail("Expected restore failure")
         } catch (_: Exception) {
         }
@@ -456,7 +455,7 @@ class FullBackupRestoreTest {
         val file = backup(source)
 
         target.initializeAndUnlockVault("TargetPass!2")
-        val result = target.backupManager.restoreFromBackupFile(file, requireSafetyBackup = true)
+        val result = target.backupManager.restoreFromBackupFile(file)
 
         assertTrue(result.verified)
         assertEquals(1, result.notes)
@@ -494,7 +493,7 @@ class FullBackupRestoreTest {
         assertTrue(external.exists())
 
         target.initializeAndUnlockVault("TargetPass!2")
-        target.backupManager.restoreFromBackupFile(external, requireSafetyBackup = true)
+        target.backupManager.restoreFromBackupFile(external)
 
         assertEquals("Fallback note", target.repository.observeAllRecords().first().single().title)
     }
@@ -518,7 +517,7 @@ class FullBackupRestoreTest {
             linkedRecordId = targetNote.id
         )
 
-        target.backupManager.restoreFromBackupFile(file, requireSafetyBackup = true)
+        target.backupManager.restoreFromBackupFile(file)
 
         val reminders = target.repository.observeAllReminders().first()
         assertEquals(1, reminders.size)
@@ -553,8 +552,7 @@ class FullBackupRestoreTest {
 
         target.initializeAndUnlockVault("TargetPass!3")
         val result = target.backupManager.restoreFromBackupFile(
-            backupFile = stripped,
-            requireSafetyBackup = true
+            backupFile = stripped
         )
 
         assertTrue(result.verified)
@@ -600,8 +598,7 @@ class FullBackupRestoreTest {
         target.initializeAndUnlockVault("TargetPass!2")
         val result = target.backupManager.restoreFromBackupFile(
             backupFile = legacy,
-            masterPassword = masterPassword.toCharArray(),
-            requireSafetyBackup = true
+            masterPassword = masterPassword.toCharArray()
         )
 
         assertEquals(1, result.sourceFormatVersion)

@@ -4,7 +4,6 @@ import android.app.Application
 import androidx.hilt.work.HiltWorkerFactory
 import androidx.work.Configuration
 import app.personalspace.vault.core.security.RecoveryGate
-import app.personalspace.vault.core.security.VaultSessionManager
 import app.personalspace.vault.data.backup.RestoreRecovery
 import app.personalspace.vault.data.backup.RestoreRecoveryCoordinator
 import app.personalspace.vault.data.reminder.ReminderNotificationHelper
@@ -16,13 +15,12 @@ import javax.inject.Inject
  * - Hilt dependency injection + HiltWorkerFactory for WorkManager jobs
  * - Notification channel creation on app start
  * - P3.1: restore crash recovery **before** any auto-unlock, then the gate decides everything
- * - Automatic frictionless vault initialization & unlock (no login or lock screens)
+ * - Vault initialization is deferred until the user chooses how to start in MainActivity
  */
 @HiltAndroidApp
 class PersonalSpaceApp : Application(), Configuration.Provider {
 
     @Inject lateinit var workerFactory: HiltWorkerFactory
-    @Inject lateinit var sessionManager: VaultSessionManager
     @Inject lateinit var notificationHelper: ReminderNotificationHelper
     @Inject lateinit var restoreRecovery: RestoreRecoveryCoordinator
 
@@ -62,9 +60,5 @@ class PersonalSpaceApp : Application(), Configuration.Provider {
                 }
             }
         }
-
-        // Only reached when the gate is clear; tryEnsureAutoUnlocked swallows the gate exception so
-        // a blocked process still starts and can render the recovery screen.
-        sessionManager.tryEnsureAutoUnlocked()
     }
 }
