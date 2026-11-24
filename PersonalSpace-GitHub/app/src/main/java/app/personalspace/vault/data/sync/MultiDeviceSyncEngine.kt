@@ -162,12 +162,25 @@ class MultiDeviceSyncEngine @Inject constructor(
                 json.decodeFromString<List<String>>(currentMeta.appliedBundleIdsJson).toMutableSet()
             }.getOrElse { mutableSetOf() }
 
-            // Phase A: List & reconcile remote immutable .psbundle files in chronological order
-            val remoteBundles = remoteDataSource.listFilesInFolder(
+            // Phase A: Read new private appDataFolder bundles plus legacy visible-folder bundles.
+            // Existing releases wrote .psbundle files into PersonalSpace_EncryptedVault in My Drive.
+            // Keep reading that location for backwards compatibility, but all new sync payloads go
+            // to appDataFolder so internal sync events do not clutter the user's visible Drive.
+            val legacyRemoteBundles = remoteDataSource.listFilesInFolder(
                 accessToken = accessToken,
                 folderId = folderId,
                 namePrefix = "psbundle_"
             )
+            val privateRemoteBundles = remoteDataSource.listAppDataFiles(
+                accessToken = accessToken,
+                namePrefix = "psbundle_"
+            ).filter { it.name.startsWith("psbundle_") && it.name.endsWith(".psbundle") }
+            val remoteBundles = (legacyRemoteBundles + privateRemoteBundles)
+                .distinctBy { it.id }
+                .sortedWith(
+                    compareBy<RemoteDriveFile> { it.createdTime.orEmpty() }
+                        .thenBy { it.name }
+                )
 
             for (remoteFile in remoteBundles) {
                 val bundleFile = File(tempDir, remoteFile.name)
@@ -215,9 +228,8 @@ class MultiDeviceSyncEngine @Inject constructor(
                         val attSnap = json.decodeFromString<SerializableAttachmentSnapshot>(op.payloadJson)
                         val localEncFile = attachmentStorage.resolveEncryptedFile(attSnap.encryptedRelativePath)
                         if (localEncFile.exists()) {
-                            val uploaded = remoteDataSource.uploadEncryptedFileResumable(
+                            val uploaded = remoteDataSource.uploadOrReplaceInAppData(
                                 accessToken = accessToken,
-                                folderId = folderId,
                                 remoteName = "psatt_${attSnap.id}.psenc",
                                 localCiphertextFile = localEncFile
                             )
@@ -266,10 +278,11 @@ class MultiDeviceSyncEngine @Inject constructor(
                 val bundleOutFile = File(tempDir, "psbundle_${now}_${deviceId.take(6)}_${bundleId.take(8)}.psbundle")
                 bundleOutFile.writeText(json.encodeToString(envelope), Charsets.UTF_8)
 
-                // Upload to Google Drive BEFORE marking operations synced!
-                remoteDataSource.uploadEncryptedFileResumable(
+                // Upload the immutable change event to private appDataFolder BEFORE marking
+                // operations synced. Unique bundle names are intentional: overwriting an older event
+                // would make an offline device miss operations when it reconnects later.
+                remoteDataSource.uploadOrReplaceInAppData(
                     accessToken = accessToken,
-                    folderId = folderId,
                     remoteName = bundleOutFile.name,
                     localCiphertextFile = bundleOutFile
                 )
