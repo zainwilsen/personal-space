@@ -388,7 +388,7 @@ class BackupPackageManager @Inject constructor(
         const val DRIVE_BACKUP_NAME = "PersonalSpace_Backup.psbackup"
         @Deprecated("Full pre-restore safety archives are no longer generated.")
         const val SAFETY_BACKUP_NAME = "PersonalSpace_Backup_safety.psbackup"
-         const val DOWNLOAD_RELATIVE_PATH = "Download/Personal Space/"
+        const val DOWNLOAD_RELATIVE_PATH = "Download/Personal Space/"
         private const val DOWNLOAD_FOLDER_KEY = "Download/Personal Space"
         private val PORTABLE_ARGON2 = Argon2KdfConfig(memoryKiB = 4096, iterations = 1, parallelism = 1)
         private val SUPPORTED_FORMAT_VERSIONS = setOf(1, 2)
@@ -410,7 +410,7 @@ class BackupPackageManager @Inject constructor(
     val safetyBackupFile: File
         get() = File(File(localBackupsDir, "safety"), SAFETY_BACKUP_NAME)
 
-     val externalLocalBackupsDir: File
+    val externalLocalBackupsDir: File
         get() = File(context.getExternalFilesDir(null) ?: context.filesDir, "local_backups").apply { mkdirs() }
 
     val externalLocalBackupFile: File
