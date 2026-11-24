@@ -60,7 +60,7 @@ jobs:
             ~/.gradle/caches/modules-2
             ~/.gradle/caches/transforms-3
             ~/.gradle/caches/jars-9
-          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle.kts', 'gradle/libs.versions.toml', 'gradle/wrapper/gradle-wrapper.properties') }}
+          key: gradle-${{ runner.os }}-${{ hashFiles('PersonalSpace-GitHub/**/*.gradle.kts', 'PersonalSpace-GitHub/gradle/libs.versions.toml', 'PersonalSpace-GitHub/gradle/wrapper/gradle-wrapper.properties') }}
           restore-keys: |
             gradle-${{ runner.os }}-
 
@@ -107,7 +107,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: test-results
-          path: app/build/test-results/testDebugUnitTest/*.xml
+          path: PersonalSpace-GitHub/app/build/test-results/testDebugUnitTest/*.xml
           if-no-files-found: warn
 
       - name: Test summary
@@ -193,7 +193,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: PersonalSpace-release-apk
-          path: app/build/outputs/apk/release/PersonalSpace_v*-release.apk
+          path: PersonalSpace-GitHub/app/build/outputs/apk/release/PersonalSpace_v*-release.apk
           retention-days: 90
 
       - name: Upload verification files
@@ -202,9 +202,9 @@ jobs:
         with:
           name: apk-verification
           path: |
-            badging.txt
-            certs.txt
-            apk-sha256.txt
+            PersonalSpace-GitHub/badging.txt
+            PersonalSpace-GitHub/certs.txt
+            PersonalSpace-GitHub/apk-sha256.txt
           if-no-files-found: ignore
 
       # ---------------------------------------------------------------- release
@@ -220,7 +220,7 @@ jobs:
             - APK: `${{ env.APK_NAME }}`
             - Signing key verified identical to previous releases (upgrade-safe)
             - Full unit test suite executed before the build
-          files: app/build/outputs/apk/release/PersonalSpace_v*-release.apk
+          files: PersonalSpace-GitHub/app/build/outputs/apk/release/PersonalSpace_v*-release.apk
           draft: false
           prerelease: false
         env:
