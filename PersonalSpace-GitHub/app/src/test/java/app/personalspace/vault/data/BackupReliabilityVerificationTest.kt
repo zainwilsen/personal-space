@@ -1140,7 +1140,7 @@ class BackupReliabilityVerificationTest {
             val rigB = IsolatedVaultTestRig(ApplicationProvider.getApplicationContext(), "safe_b", clock = rig.clock)
             rigB.joinExistingVaultEnvelope(rig.vaultKeyManager.readEnvelopeBundle()!!, password)
             rigB.repository.saveRecord(null, "Will Be Replaced", "x", null, null, emptyList())
-            val safetyFile = rigB.backupManager.safetyBackupFile
+            val safetyFile = File(rigB.context.filesDir, "local_backups/safety/PersonalSpace_Backup_safety.psbackup")
             safetyFile.delete()
             note("hidden safety archive before restore exists=${safetyFile.exists()}")
             val result = rigB.backupManager.restoreFromBackupFile(backupFile = backup)
