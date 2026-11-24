@@ -100,7 +100,9 @@ jobs:
       # ---------------------------------------------------------------- tests
       # Item 7 of the project's own rules: no APK without an executed test suite.
       - name: Prepare verification evidence directory
-        run: mkdir -p /home/user/verification/evidence
+        run: |
+          sudo mkdir -p /home/user/verification/evidence
+          sudo chown -R "$(id -u):$(id -g)" /home/user/verification
 
       - name: Run unit tests
         run: ./gradlew --no-daemon testDebugUnitTest --console=plain
