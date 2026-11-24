@@ -46,7 +46,7 @@ class BackupAndExportIntegrationTest {
     }
 
     @Test
-    fun `encrypted psbackup roundtrips records versions and attachments via the 24-word Recovery Key with a full replace and creates a pre-restore safety backup`() = runBlocking {
+    fun `encrypted psbackup roundtrips records versions and attachments via the 24-word Recovery Key with a full replace and no hidden safety archive`() = runBlocking {
         val init = sourceRig.initializeAndUnlockVault("MasterVaultPass!1")
         val recoveryPhrase = init.recoveryWords.joinToString(" ")
 
@@ -88,12 +88,12 @@ class BackupAndExportIntegrationTest {
             // Expected
         }
 
-        // 2. Initialize targetRig with some local record first so we can verify automatic PRE_RESTORE_SAFETY backup!
+        // 2. Initialize targetRig with local data so restore proves that successful replacement does not keep a hidden full backup.
         targetRig.initializeAndUnlockVault("TemporaryLocalPass!2")
         targetRig.repository.saveRecord(
             existingRecordId = null,
             title = "Pre-existing Local Note",
-            description = "Should be backed up in safety archive before overwrite",
+            description = "This local note should be replaced by the imported backup",
             folderId = null,
             category = null,
             customFields = emptyList()
@@ -105,10 +105,11 @@ class BackupAndExportIntegrationTest {
             recoveryPhrase = recoveryPhrase
         )
 
-        // Verify pre-restore safety backup file was generated in targetRig.backupManager.localBackupsDir
+        // No hidden full-size .psbackup safety archive is created. Failed/interrupted restores are
+        // protected separately by the temporary RestoreJournal rollback snapshot.
         assertTrue(
-            "Pre-restore safety backup must exist on disk",
-            targetRig.backupManager.safetyBackupFile.exists()
+            "Hidden full-size safety archive must not be generated",
+            !targetRig.backupManager.safetyBackupFile.exists()
         )
 
         // Verify restored vault contents & decrypted attachment match source byte-for-byte
