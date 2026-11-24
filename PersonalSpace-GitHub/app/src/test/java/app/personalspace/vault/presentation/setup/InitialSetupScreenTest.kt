@@ -22,7 +22,7 @@ class InitialSetupScreenTest {
     val composeTestRule = createComposeRule()
 
     @Test
-    fun \`first launch shows only centered brand and the two setup actions\`() {
+    fun firstLaunchShowsOnlyCenteredBrandAndTwoSetupActions() {
         var createTapped = false
         var restoreTapped = false
 
