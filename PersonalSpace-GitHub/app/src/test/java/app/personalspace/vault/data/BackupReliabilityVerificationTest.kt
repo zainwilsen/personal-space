@@ -173,7 +173,7 @@ class BackupReliabilityVerificationTest {
     ): IsolatedVaultTestRig {
         val rig = IsolatedVaultTestRig(ApplicationProvider.getApplicationContext(), name, clock = source.clock)
         rig.joinExistingVaultEnvelope(source.vaultKeyManager.readEnvelopeBundle()!!, password)
-        runBlocking { rig.backupManager.restoreFromBackupFile(backupFile = backup, requireSafetyBackup = true) }
+        runBlocking { rig.backupManager.restoreFromBackupFile(backupFile = backup) }
         return rig
     }
 
@@ -575,7 +575,7 @@ class BackupReliabilityVerificationTest {
             cases.forEach { c ->
                 val bad = File(rig.context.cacheDir, "bad_${c.name}.psbackup")
                 bad.writeBytes(c.mutate(goodBytes))
-                val result = runCatching { rig.backupManager.restoreFromBackupFile(backupFile = bad, requireSafetyBackup = false) }
+                val result = runCatching { rig.backupManager.restoreFromBackupFile(backupFile = bad) }
                 val ex = result.exceptionOrNull()
                 val failedLoudly = ex != null
                 val notesAfter = rig.dbHolder.getDatabase().recordDao().getAllRecordsIncludingDeleted().size
@@ -685,7 +685,7 @@ class BackupReliabilityVerificationTest {
             // Build a package that passes HMAC + relationship validation + staging, but whose
             // manifest.draftCount disagrees with the snapshot so verifyRestoredVault() fails at B:1120.
             val tampered = buildPackageWithDraftCountMismatch(rig, good)
-            val attempt = runCatching { rigB.backupManager.restoreFromBackupFile(backupFile = tampered, requireSafetyBackup = false) }
+            val attempt = runCatching { rigB.backupManager.restoreFromBackupFile(backupFile = tampered) }
             val ex = attempt.exceptionOrNull()
             note("post-transaction failure: ${ex?.javaClass?.simpleName}: ${ex?.message}")
             assertTrue("verification must fail", attempt.isFailure)
@@ -794,7 +794,7 @@ class BackupReliabilityVerificationTest {
             val before = rigB.dbHolder.getDatabase().recordDao().getAllRecordsIncludingDeleted().size
             note("rigB before restore: records=$before (empty vault)")
 
-            val result = rigB.backupManager.restoreFromBackupFile(backupFile = backup, requireSafetyBackup = false)
+            val result = rigB.backupManager.restoreFromBackupFile(backupFile = backup)
             note("restore result verified=${result.verified} notes=${result.notes} folders=${result.folders} attachments=${result.attachments} drafts=${result.drafts} versions=${result.versions} images=${result.inlineImages}")
             assertTrue(result.verified)
             val afterB = rigB.dbHolder.getDatabase().recordDao().getAllRecordsIncludingDeleted()
@@ -867,14 +867,14 @@ class BackupReliabilityVerificationTest {
 
             val rigB = IsolatedVaultTestRig(ApplicationProvider.getApplicationContext(), "idem_b", clock = rig.clock)
             rigB.joinExistingVaultEnvelope(rig.vaultKeyManager.readEnvelopeBundle()!!, password)
-            val r1 = rigB.backupManager.restoreFromBackupFile(backupFile = backup, requireSafetyBackup = false)
+            val r1 = rigB.backupManager.restoreFromBackupFile(backupFile = backup)
             val counts1 = Triple(
                 rigB.dbHolder.getDatabase().recordDao().getAllRecordsIncludingDeleted().size,
                 rigB.dbHolder.getDatabase().attachmentDao().getAllAttachmentsIncludingDeleted().size,
                 rigB.dbHolder.getDatabase().recordDao().getAllVersions().size
             )
             val files1 = rigB.attachmentStorage.encryptedDir.listFiles()!!.size
-            val r2 = rigB.backupManager.restoreFromBackupFile(backupFile = backup, requireSafetyBackup = false)
+            val r2 = rigB.backupManager.restoreFromBackupFile(backupFile = backup)
             val counts2 = Triple(
                 rigB.dbHolder.getDatabase().recordDao().getAllRecordsIncludingDeleted().size,
                 rigB.dbHolder.getDatabase().attachmentDao().getAllAttachmentsIncludingDeleted().size,
@@ -1006,7 +1006,7 @@ class BackupReliabilityVerificationTest {
             val crafted = craftPackageWithDescription(rig, good.file, fx.noteId, poisoned)
             val rigB = IsolatedVaultTestRig(ApplicationProvider.getApplicationContext(), "poison_b", clock = rig.clock)
             rigB.joinExistingVaultEnvelope(rig.vaultKeyManager.readEnvelopeBundle()!!, password)
-            val restored = runCatching { rigB.backupManager.restoreFromBackupFile(crafted, requireSafetyBackup = false) }
+            val restored = runCatching { rigB.backupManager.restoreFromBackupFile(crafted) }
             note("restore of package carrying poisoned description -> ${restored.fold({ "SUCCEEDED (verified=" + it.verified + ")" }, { "THREW " + it.javaClass.simpleName })}")
             val row = rigB.dbHolder.getDatabase().recordDao().getRecordById(fx.noteId)
             note("record present after restore = ${row != null}")
@@ -1107,7 +1107,7 @@ class BackupReliabilityVerificationTest {
             // rigB is a completely different vault (different VDK, different master password)
             rigB.initializeAndUnlockVault("DeviceB#2026")
             val result = rigB.backupManager.restoreFromBackupFile(
-                backupFile = backup, masterPassword = "DeviceA#2026".toCharArray(), requireSafetyBackup = false
+                backupFile = backup, masterPassword = "DeviceA#2026".toCharArray()
             )
             note("cross-vault restore: verified=${result.verified} notes=${result.notes} attachments=${result.attachments} images=${result.inlineImages}")
             assertTrue(result.verified)
