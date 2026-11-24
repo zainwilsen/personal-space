@@ -18,7 +18,7 @@ import app.personalspace.vault.data.backup.BackupPackageManager.Companion.STAGE_
 import app.personalspace.vault.data.backup.BackupPackageManager.Companion.STAGE_PRE_COMMIT
 import app.personalspace.vault.data.backup.BackupPackageManager.Companion.STAGE_RELATIONSHIPS
 import app.personalspace.vault.data.backup.BackupPackageManager.Companion.STAGE_ROLLBACK
-import app.personalspace.vault.data.backup.BackupPackageManager.Companion.STAGE_SAFETY_BACKUP
+import app.personalspace.vault.data.backup.BackupPackageManager.Companion.STAGE_PRE_DB_TRANSACTION
 import app.personalspace.vault.data.backup.BackupPackageManager.Companion.STAGE_SNAPSHOT_DECRYPTED
 import app.personalspace.vault.data.backup.BackupPackageManager.Companion.STAGE_STAGE_ATTACHMENTS
 import app.personalspace.vault.data.backup.BackupPackageManager.Companion.STAGE_STAGE_IMAGES
@@ -268,12 +268,12 @@ class RestoreFailureMatrixTest {
     }
 
     @Test
-    fun `P9-S5 a safety-backup failure leaves the vault untouched`() = runBlocking {
+    fun `P9-S5 a pre-transaction failure rolls back the vault cleanly`() = runBlocking {
         val current = seedCurrentVault()
         val incoming = seedIncomingPackage()
-        injectAndAssert(STAGE_SAFETY_BACKUP, current, incoming)
-        note("=> requireSafetyBackup failures cannot start the destructive section")
-        dump("p9_S5_safety_backup")
+        injectAndAssert(STAGE_PRE_DB_TRANSACTION, current, incoming)
+        note("=> a failure at the pre-transaction checkpoint restores the prior DB and media from the rollback journal")
+        dump("p9_S5_pre_db_transaction")
     }
 
     // ------------------------------------------------------------------ the destructive section
@@ -468,7 +468,7 @@ class RestoreFailureMatrixTest {
             STAGE_GUARD_CLEARED, STAGE_INSPECTION, STAGE_VALIDATED, STAGE_KEYS_UNLOCKED,
             STAGE_MANIFEST_HMAC, STAGE_SNAPSHOT_DECRYPTED, STAGE_RELATIONSHIPS,
             STAGE_STAGE_ATTACHMENTS, STAGE_ATTACHMENTS_STAGED, STAGE_STAGE_IMAGES, STAGE_IMAGES_STAGED,
-            STAGE_SAFETY_BACKUP, STAGE_INSTALL_ATTACHMENTS, STAGE_INSTALL_IMAGES, STAGE_DB_TRANSACTION,
+            STAGE_PRE_DB_TRANSACTION, STAGE_INSTALL_ATTACHMENTS, STAGE_INSTALL_IMAGES, STAGE_DB_TRANSACTION,
             STAGE_VERIFICATION, STAGE_PRE_COMMIT, STAGE_POST_COMMIT_CLEANUP
         )
         val hits = FailureInjection.hitStages.toSet()
