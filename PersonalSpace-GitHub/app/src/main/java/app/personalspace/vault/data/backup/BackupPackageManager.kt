@@ -373,7 +373,9 @@ class BackupPackageManager @Inject constructor(
         const val STAGE_ATTACHMENTS_STAGED = "ATTACHMENTS_STAGED"
         const val STAGE_STAGE_IMAGES = "STAGE_IMAGES"
         const val STAGE_IMAGES_STAGED = "IMAGES_STAGED"
-        const val STAGE_SAFETY_BACKUP = "SAFETY_BACKUP"
+        const val STAGE_PRE_DB_TRANSACTION = "PRE_DB_TRANSACTION"
+        @Deprecated("The full safety archive was removed; this checkpoint now marks the pre-transaction boundary.")
+        const val STAGE_SAFETY_BACKUP = STAGE_PRE_DB_TRANSACTION
         const val STAGE_INSTALL_ATTACHMENTS = "INSTALL_ATTACHMENTS"
         const val STAGE_INSTALL_IMAGES = "INSTALL_IMAGES"
         const val STAGE_DB_TRANSACTION = "DB_TRANSACTION"
@@ -384,6 +386,7 @@ class BackupPackageManager @Inject constructor(
 
         const val LOCAL_BACKUP_NAME = "PersonalSpace_Backup.psbackup"
         const val DRIVE_BACKUP_NAME = "PersonalSpace_Backup.psbackup"
+        @Deprecated("Full pre-restore safety archives are no longer generated.")
         const val SAFETY_BACKUP_NAME = "PersonalSpace_Backup_safety.psbackup"
         const val DOWNLOAD_RELATIVE_PATH = "Download/Personal Space/"
         private const val DOWNLOAD_FOLDER_KEY = "Download/Personal Space"
@@ -401,8 +404,9 @@ class BackupPackageManager @Inject constructor(
     val singleLocalBackupFile: File
         get() = File(localBackupsDir, LOCAL_BACKUP_NAME)
 
+    @Deprecated("The hidden full safety archive is no longer generated.")
     val safetyBackupFile: File
-        get() = File(File(localBackupsDir, "safety").apply { mkdirs() }, SAFETY_BACKUP_NAME)
+        get() = File(File(localBackupsDir, "safety"), SAFETY_BACKUP_NAME)
 
     val externalLocalBackupsDir: File
         get() = File(context.getExternalFilesDir(null) ?: context.filesDir, "local_backups").apply { mkdirs() }
@@ -633,8 +637,10 @@ class BackupPackageManager @Inject constructor(
             manifestHmacBase64 = computeManifestHmac(unsignedManifest, subKeys.backupManifestKey)
         )
 
-        val destFile = targetFile
-            ?: if (backupKind == BackupKind.PRE_RESTORE_SAFETY) safetyBackupFile else singleLocalBackupFile
+        // PRE_RESTORE_SAFETY remains in the enum for old backup-history rows, but no new hidden
+        // full-size safety archive is written. Restore interruption protection is handled by
+        // RestoreJournal + RestoreSnapshot instead.
+        val destFile = targetFile ?: singleLocalBackupFile
         val tmpZip = File(
             destFile.parentFile ?: localBackupsDir,
             "${destFile.name}.${IdGenerator.newUuid()}.tmp"
@@ -688,7 +694,7 @@ class BackupPackageManager @Inject constructor(
             }
             inspectAndValidatePackageStructure(destFile)
 
-            if (targetFile == null && backupKind != BackupKind.PRE_RESTORE_SAFETY) {
+            if (targetFile == null) {
                 runCatching { publishToExternalStorage(destFile) }
                 runCatching { rememberBackupFingerprint(computeVaultFingerprint()) }
             }
@@ -817,17 +823,19 @@ class BackupPackageManager @Inject constructor(
     /**
      * Restores an encrypted `.psbackup` package using EITHER the Master Password OR the 24-word Recovery Key.
      *
-     * Safety guarantees:
-     * 1. Fully validates archive checksums, HMAC, and decrypts `vault_snapshot.enc` BEFORE altering local vault.
-     * 2. Automatically creates a pre-restore safety `.psbackup` if an unlocked local vault currently exists.
-     * 3. Atomically writes restored key envelopes, attachments, and database entities inside a Room transaction.
+     * Restore guarantees:
+     * 1. Validates archive checksums, HMAC, decrypts the snapshot, and stages media before modifying the vault.
+     * 2. Takes a temporary, hash-verified rollback snapshot of the live database and media before destructive writes.
+     * 3. Verifies the restored content before committing; a failed/interrupted restore can be rolled back.
+     *
+     * A successful restore replaces the previous local content. No separate full-size safety archive is kept.
      */
     suspend fun restoreFromBackupFile(
         backupFile: File,
         masterPassword: CharArray? = null,
         recoveryPhrase: String? = null,
         recoveryPassword: CharArray? = null,
-        requireSafetyBackup: Boolean = false
+        @Suppress("UNUSED_PARAMETER") requireSafetyBackup: Boolean = false
     ): BackupRestoreResult = withContext(Dispatchers.IO) {
         // P2 / correction #2: never start a restore while an earlier one is unresolved. This is the
         // guard that makes "discard the existing vault" unreachable — an unresolved journal or an
@@ -860,16 +868,8 @@ class BackupPackageManager @Inject constructor(
             stageInlineImages(backupFile, manifest, candidateSubKeys, stagedImagesDir)
             FailureInjection.hit(STAGE_IMAGES_STAGED)
 
-            if (vaultKeyManager.isVaultInitialized() && sessionManager.currentSubKeysOrNull() != null) {
-                val safetyOk = runCatching {
-                    createFullBackupFile(BackupKind.PRE_RESTORE_SAFETY, recordHistoryInDb = false)
-                }.isSuccess
-                if (!safetyOk && requireSafetyBackup) {
-                    throw BackupVerificationException(
-                        "Restore cancelled: safety backup of current data could not be created."
-                    )
-                }
-            }
+            // No extra full-size .psbackup is created here. RestoreSnapshot below makes the
+            // temporary rollback copy needed only until this restore has been verified and committed.
 
             val attachmentsDir = attachmentStorage.encryptedDir
             val imagesDir = inlineImageStore.imagesDir
@@ -943,7 +943,7 @@ class BackupPackageManager @Inject constructor(
                     if (staged.isFile) staged.copyTo(File(imagesDir, staged.name), overwrite = true)
                 }
 
-                FailureInjection.hit(STAGE_SAFETY_BACKUP)
+                FailureInjection.hit(STAGE_PRE_DB_TRANSACTION)
                 journal.advance(RestorePhase.DB_TXN)
                 FailureInjection.hit(STAGE_INSTALL_ATTACHMENTS)
                 db.withTransaction {
