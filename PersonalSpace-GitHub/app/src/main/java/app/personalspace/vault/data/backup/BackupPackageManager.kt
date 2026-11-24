@@ -841,7 +841,6 @@ class BackupPackageManager @Inject constructor(
         recoveryPhrase: String? = null,
         recoveryPassword: CharArray? = null,
         @Suppress("UNUSED_PARAMETER")
-        @Deprecated("This option was removed. Restore interruption protection uses a temporary rollback journal.")
         requireSafetyBackup: Boolean = false
     ): BackupRestoreResult = withContext(Dispatchers.IO) {
         // P2 / correction #2: never start a restore while an earlier one is unresolved. This is the
