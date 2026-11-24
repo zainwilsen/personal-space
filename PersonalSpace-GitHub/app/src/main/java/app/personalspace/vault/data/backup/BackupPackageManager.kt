@@ -455,6 +455,9 @@ class BackupPackageManager @Inject constructor(
         targetFile: File? = null,
         recordHistoryInDb: Boolean = true
     ): CreatedBackupOutcome = withContext(Dispatchers.IO) {
+        require(backupKind != BackupKind.PRE_RESTORE_SAFETY) {
+            "PRE_RESTORE_SAFETY archives are no longer generated. Restore interruption protection uses a temporary rollback journal."
+        }
         val subKeys = sessionManager.requireSubKeys()
         val envelopeBundle = vaultKeyManager.readEnvelopeBundle()
             ?: throw IllegalStateException("Vault key envelope bundle is missing.")
