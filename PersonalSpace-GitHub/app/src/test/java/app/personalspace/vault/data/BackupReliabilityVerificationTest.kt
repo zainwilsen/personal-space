@@ -1128,9 +1128,9 @@ class BackupReliabilityVerificationTest {
         } finally { rigA.close(); rigB.close(); dump("extra_cross_vault") }
     }
 
-    // ============================================================ extra: concurrent-ish safety
+    // ============================================================ extra: restore does not keep a redundant full archive
     @Test
-    fun `extra restore creates a pre-restore safety backup file`() = runBlocking {
+    fun `restore uses temporary rollback journal without creating a hidden safety archive`() = runBlocking {
         val password = "Verify#2026"
         val rig = IsolatedVaultTestRig(ApplicationProvider.getApplicationContext(), "safe_a")
         try {
@@ -1142,16 +1142,15 @@ class BackupReliabilityVerificationTest {
             rigB.repository.saveRecord(null, "Will Be Replaced", "x", null, null, emptyList())
             val safetyFile = rigB.backupManager.safetyBackupFile
             safetyFile.delete()
-            note("safety file before restore exists=${safetyFile.exists()}")
-            val r = rigB.backupManager.restoreFromBackupFile(backupFile = backup, requireSafetyBackup = true)
-            note("restore verified=${r.verified}")
-            note("safety file after restore exists=${safetyFile.exists()} size=${if (safetyFile.exists()) safetyFile.length() else 0}")
-            assertTrue("pre-restore safety backup must be created", safetyFile.exists())
-            // the safety package must itself be restorable
-            val restored = rigB.backupManager.inspectAndValidatePackageStructure(safetyFile)
-            note("safety package valid: records=${restored.recordCount} folders=${restored.folderCount} attachments=${restored.attachmentCount}")
-            note("=== EXTRA RESULT: pre-restore safety backup exists, is structurally valid and re-inspectable ===")
+            note("hidden safety archive before restore exists=${safetyFile.exists()}")
+            val result = rigB.backupManager.restoreFromBackupFile(backupFile = backup)
+            note("restore verified=${result.verified}")
+            note("hidden safety archive after restore exists=${safetyFile.exists()}")
+            assertTrue("restore must still verify the imported vault", result.verified)
+            assertTrue("restore must not create a hidden full-size safety archive", !safetyFile.exists())
+            // Failure and process-death recovery continue to be covered by the RestoreJournal tests.
+            note("=== EXTRA RESULT: successful restore verified; no hidden full-size safety archive created ===")
             rigB.close()
-        } finally { rig.close(); dump("extra_safety_backup") }
+        } finally { rig.close(); dump("restore_without_full_safety_archive") }
     }
 }
