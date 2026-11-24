@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Bauhaus Personal Space Emblem within 66dp safe zone (21..87) -->
+    <!-- 1. Red Rectangular Shape (#E94528) -->
+    <path
+        android:fillColor="#E94528"
+        android:pathData="M28,30h18v44h-18z" />
+
+    <!-- 2. Blue Semicircular Shape (#25559A) facing right -->
+    <path
+        android:fillColor="#25559A"
+        android:pathData="M50,30 A22,22 0 0,1 50,74 Z" />
+
+    <!-- 3. Yellow Geometric Quarter-Circle Accent (#FEBD03) -->
+    <path
+        android:fillColor="#FEBD03"
+        android:pathData="M50,74 L74,74 A24,24 0 0,0 50,50 Z" />
+
+    <!-- 4. Thin Vertical Black Architectural Line (#101010) -->
+    <path
+        android:fillColor="#101010"
+        android:pathData="M48.8,24h2.4v60h-2.4z" />
+
+    <!-- 5. Black Circular Focal Element (#101010) -->
+    <path
+        android:fillColor="#101010"
+        android:pathData="M37,43 m-6.5,0 a6.5,6.5 0 1,0 13,0 a6.5,6.5 0 1,0 -13,0" />
+</vector>
