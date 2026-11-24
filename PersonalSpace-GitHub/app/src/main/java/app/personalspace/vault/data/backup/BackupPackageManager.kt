@@ -374,8 +374,6 @@ class BackupPackageManager @Inject constructor(
         const val STAGE_STAGE_IMAGES = "STAGE_IMAGES"
         const val STAGE_IMAGES_STAGED = "IMAGES_STAGED"
         const val STAGE_PRE_DB_TRANSACTION = "PRE_DB_TRANSACTION"
-        @Deprecated("The full safety archive was removed; this checkpoint now marks the pre-transaction boundary.")
-        const val STAGE_SAFETY_BACKUP = STAGE_PRE_DB_TRANSACTION
         const val STAGE_INSTALL_ATTACHMENTS = "INSTALL_ATTACHMENTS"
         const val STAGE_INSTALL_IMAGES = "INSTALL_IMAGES"
         const val STAGE_DB_TRANSACTION = "DB_TRANSACTION"
@@ -386,9 +384,7 @@ class BackupPackageManager @Inject constructor(
 
         const val LOCAL_BACKUP_NAME = "PersonalSpace_Backup.psbackup"
         const val DRIVE_BACKUP_NAME = "PersonalSpace_Backup.psbackup"
-        @Deprecated("Full pre-restore safety archives are no longer generated.")
-        const val SAFETY_BACKUP_NAME = "PersonalSpace_Backup_safety.psbackup"
-        const val DOWNLOAD_RELATIVE_PATH = "Download/Personal Space/"
+         const val DOWNLOAD_RELATIVE_PATH = "Download/Personal Space/"
         private const val DOWNLOAD_FOLDER_KEY = "Download/Personal Space"
         private val PORTABLE_ARGON2 = Argon2KdfConfig(memoryKiB = 4096, iterations = 1, parallelism = 1)
         private val SUPPORTED_FORMAT_VERSIONS = setOf(1, 2)
@@ -404,11 +400,7 @@ class BackupPackageManager @Inject constructor(
     val singleLocalBackupFile: File
         get() = File(localBackupsDir, LOCAL_BACKUP_NAME)
 
-    @Deprecated("The hidden full safety archive is no longer generated.")
-    val safetyBackupFile: File
-        get() = File(File(localBackupsDir, "safety"), SAFETY_BACKUP_NAME)
-
-    val externalLocalBackupsDir: File
+     val externalLocalBackupsDir: File
         get() = File(context.getExternalFilesDir(null) ?: context.filesDir, "local_backups").apply { mkdirs() }
 
     val externalLocalBackupFile: File
@@ -837,8 +829,7 @@ class BackupPackageManager @Inject constructor(
         backupFile: File,
         masterPassword: CharArray? = null,
         recoveryPhrase: String? = null,
-        recoveryPassword: CharArray? = null,
-        @Suppress("UNUSED_PARAMETER") requireSafetyBackup: Boolean = false
+        recoveryPassword: CharArray? = null
     ): BackupRestoreResult = withContext(Dispatchers.IO) {
         // P2 / correction #2: never start a restore while an earlier one is unresolved. This is the
         // guard that makes "discard the existing vault" unreachable — an unresolved journal or an
