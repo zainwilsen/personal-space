@@ -63,6 +63,8 @@ interface PersonalSpaceRepository {
     fun latestCachedFolders(): List<Folder>? = null
     fun latestCachedRecords(): List<RecordItem>? = null
     fun latestCachedRecordById(recordId: String): RecordItem? = null
+    /** Drop warmed snapshots after a vault restore or lock; callers must re-observe fresh data. */
+    fun invalidateCaches() {}
 
     // Dashboard & Statistics
     fun observeDashboardOverview(): Flow<DashboardOverview>

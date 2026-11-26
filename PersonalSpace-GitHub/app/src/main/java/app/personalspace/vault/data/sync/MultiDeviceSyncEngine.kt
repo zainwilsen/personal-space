@@ -34,6 +34,7 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
 import java.nio.charset.StandardCharsets
+import java.time.Instant
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -118,7 +119,10 @@ class MultiDeviceSyncEngine @Inject constructor(
             )
         }
 
-        val authSession = authManager.getCurrentSession()
+        // getValidSession() silently re-authorizes a token that is about to expire. Using the raw
+        // cached session here meant every sync after ~1 hour failed with HTTP 401 until the user
+        // manually reconnected Drive in Settings.
+        val authSession = authManager.getValidSession()
         val db = dbHolder.getDatabase()
         val syncDao = db.syncDao()
 
@@ -182,12 +186,20 @@ class MultiDeviceSyncEngine @Inject constructor(
                         .thenBy { it.name }
                 )
 
+            // fileId -> bundleId for bundles that belong to THIS vault. Retention must never delete
+            // another vault's events on a shared Google account, and must never delete a file whose
+            // envelope could not be read.
+            val bundleIdByFileId = HashMap<String, String>()
+
             for (remoteFile in remoteBundles) {
                 val bundleFile = File(tempDir, remoteFile.name)
                 remoteDataSource.downloadEncryptedFile(accessToken, remoteFile.id, bundleFile)
                 val envelope = json.decodeFromString<EncryptedChangeBundleEnvelope>(
                     bundleFile.readText(Charsets.UTF_8)
                 )
+                if (envelope.vaultId == subKeys.vaultId) {
+                    bundleIdByFileId[remoteFile.id] = envelope.bundleId
+                }
 
                 // Skip bundles belonging to another vault or already reconciled idempotently
                 if (envelope.vaultId != subKeys.vaultId || envelope.bundleId in appliedIds) {
@@ -307,6 +319,18 @@ class MultiDeviceSyncEngine @Inject constructor(
                 appliedIds.add(bundleId)
                 uploadedOpsCount = pendingOps.size
             }
+
+            // Phase C: retention. Immutable bundles are the only way an offline device catches up,
+            // so the window is deliberately generous and the newest bundles are always kept. Files
+            // confirmed deleted also drop out of appliedIds, which stops the local index (rewritten
+            // on every cycle) from growing without bound.
+            pruneOldBundles(
+                accessToken = accessToken,
+                remoteBundles = remoteBundles,
+                bundleIdByFileId = bundleIdByFileId,
+                appliedIds = appliedIds,
+                now = now
+            )
 
             val unresolvedConflicts = db.syncDao().getSyncMetadata()
             val totalUnresolved = countUnresolvedConflicts()
@@ -813,10 +837,66 @@ class MultiDeviceSyncEngine @Inject constructor(
         )
     }
 
+    /**
+     * Bounds the growth of both the Drive `appDataFolder` and `appliedBundleIdsJson`.
+     *
+     * Every sync cycle used to upload one more immutable `.psbundle` and append its id to the local
+     * index forever; nothing ever deleted a bundle. Immutable bundles are still the only transport
+     * for a device that is offline, so we keep a generous window and ALWAYS keep the newest N. Only
+     * bundles whose envelope belongs to this vault and was read successfully are candidates, so two
+     * vaults sharing a Google account cannot delete each other's history.
+     *
+     * A device offline for longer than [SYNC_BUNDLE_RETENTION_MILLIS] may miss old events; that is
+     * the explicit trade-off for bounded storage, and it is far safer than a `pageSize`-truncated
+     * listing that silently loses history.
+     */
+    private suspend fun pruneOldBundles(
+        accessToken: String,
+        remoteBundles: List<RemoteDriveFile>,
+        bundleIdByFileId: Map<String, String>,
+        appliedIds: MutableSet<String>,
+        now: Long
+    ) {
+        val candidates = remoteBundles.filter { file ->
+            file.name.endsWith(".psbundle") && bundleIdByFileId.containsKey(file.id)
+        }.sortedWith(
+            compareBy<RemoteDriveFile> { it.createdTime.orEmpty() }.thenBy { it.name }
+        )
+
+        val keepFrom = (candidates.size - SYNC_MIN_BUNDLES_KEPT).coerceAtLeast(0)
+        val protectedIds = candidates.drop(keepFrom).map { it.id }.toSet()
+        val cutoff = now - SYNC_BUNDLE_RETENTION_MILLIS
+
+        for (file in candidates) {
+            if (file.id in protectedIds) continue
+            val created = parseDriveCreatedTimeMillis(file.createdTime) ?: continue
+            if (created >= cutoff) continue
+            val removed = runCatching { remoteDataSource.deleteFile(accessToken, file.id) }.isSuccess
+            if (removed) {
+                // Only forget the id when the file is really gone; otherwise the next cycle would
+                // re-download and re-apply the same bundle.
+                bundleIdByFileId[file.id]?.let { appliedIds.remove(it) }
+            }
+        }
+    }
+
+    private fun parseDriveCreatedTimeMillis(value: String?): Long? {
+        if (value.isNullOrBlank()) return null
+        return runCatching { Instant.parse(value).toEpochMilli() }.getOrNull()
+    }
+
     private fun bundleAad(vaultId: String, bundleId: String): ByteArray =
         "PersonalSpace/v1/syncbundle/$vaultId/$bundleId".toByteArray(StandardCharsets.UTF_8)
 
     companion object {
+        /**
+         * Immutable sync bundles are the only transport for offline devices. Keep a long window so a
+         * device that has been offline for weeks still catches up, but stop unbounded growth of both
+         * appDataFolder storage and the appliedBundleIds index.
+         */
+        private const val SYNC_BUNDLE_RETENTION_MILLIS = 90L * 24L * 60L * 60L * 1000L
+        private const val SYNC_MIN_BUNDLES_KEPT = 100
+
         fun toFolderSnapshot(e: FolderEntity) = SerializableFolderSnapshot(
             e.id, e.name, e.parentFolderId, e.colorId, e.createdAt, e.modifiedAt,
             e.sortOrder, e.isDeleted, e.deletedAt, e.deletedBatchId, e.syncVersion, e.lastModifiedByDeviceId

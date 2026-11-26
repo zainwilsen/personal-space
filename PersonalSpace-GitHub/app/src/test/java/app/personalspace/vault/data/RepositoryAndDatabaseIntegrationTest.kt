@@ -7,6 +7,7 @@ import androidx.test.core.app.ApplicationProvider
 import app.personalspace.vault.IsolatedVaultTestRig
 import app.personalspace.vault.core.designsystem.FolderAccentColor
 import app.personalspace.vault.data.local.db.PersonalSpaceDatabase
+import app.personalspace.vault.data.local.entity.ReminderEntity
 import app.personalspace.vault.data.repository.PersonalSpaceRepositoryImpl
 import app.personalspace.vault.domain.model.AttachmentKind
 import app.personalspace.vault.domain.model.CustomField
@@ -270,6 +271,86 @@ class RepositoryAndDatabaseIntegrationTest {
         rig.clock.advanceBy(3_600_000L) // +1 hour past due
         rig.repository.refreshMissedReminders()
         assertEquals(ReminderStatus.MISSED, rig.repository.getReminderById(onceRem.id)?.status)
+    }
+
+    @Test
+    fun `missed recurring reminder logs MISSED but keeps the next future occurrence alive`() = runBlocking {
+        val scheduledAt = rig.clock.nowMillis() + 600_000L
+        val (dailyRem, _) = rig.repository.saveReminder(
+            existingReminderId = null,
+            title = "Daily medicine",
+            notes = "After breakfast",
+            scheduledAtMillis = scheduledAt,
+            recurrence = RecurrenceType.DAILY,
+            priority = ReminderPriority.HIGH,
+            linkedRecordId = null
+        )
+
+        // Phone was off / alarm was missed; refresh used to mark the whole SERIES MISSED forever.
+        rig.clock.advanceBy(3_600_000L)
+        rig.repository.refreshMissedReminders()
+
+        val updated = rig.repository.getReminderById(dailyRem.id)!!
+        assertEquals(ReminderStatus.PENDING, updated.status)
+        assertTrue(updated.scheduledAtMillis > rig.clock.nowMillis())
+        val occurrences = rig.repository.observeReminderOccurrences().first()
+        assertEquals(1, occurrences.size)
+        assertEquals(ReminderStatus.MISSED, occurrences.first().outcome)
+
+        // Idempotent: the future trigger must not be marked missed again on the next dashboard open.
+        rig.repository.refreshMissedReminders()
+        assertEquals(1, rig.repository.observeReminderOccurrences().first().size)
+    }
+
+    @Test
+    fun `legacy MISSED recurring rows are revived instead of staying dead after upgrade`() = runBlocking {
+        val now = rig.clock.nowMillis()
+        val oldTrigger = now - 2L * 24L * 3_600_000L
+        rig.dbHolder.getDatabase().reminderDao().upsert(
+            ReminderEntity(
+                id = "legacy-dead-daily",
+                title = "Legacy daily",
+                notes = "",
+                scheduledAtMillis = oldTrigger,
+                recurrenceType = RecurrenceType.DAILY.name,
+                priority = ReminderPriority.MEDIUM.name,
+                status = ReminderStatus.MISSED.name,
+                snoozedUntilMillis = null,
+                linkedRecordId = null,
+                createdAt = oldTrigger,
+                modifiedAt = oldTrigger,
+                isDeleted = false,
+                syncVersion = 1L,
+                lastModifiedByDeviceId = "old-device",
+                syncPending = false
+            )
+        )
+
+        rig.repository.refreshMissedReminders()
+
+        val revived = rig.repository.getReminderById("legacy-dead-daily")!!
+        assertEquals(ReminderStatus.PENDING, revived.status)
+        assertTrue(revived.scheduledAtMillis > now)
+        // The old MISSED outcome was already logged by the previous release; do not duplicate it.
+        assertEquals(0, rig.repository.observeReminderOccurrences().first().size)
+    }
+
+    @Test
+    fun `saveReminder rejects a past trigger instead of firing an immediate alarm`() = runBlocking {
+        try {
+            rig.repository.saveReminder(
+                existingReminderId = null,
+                title = "Already late",
+                notes = "",
+                scheduledAtMillis = rig.clock.nowMillis() - 1_000L,
+                recurrence = RecurrenceType.ONCE,
+                priority = ReminderPriority.MEDIUM,
+                linkedRecordId = null
+            )
+            fail("Expected IllegalArgumentException for a past reminder trigger")
+        } catch (expected: IllegalArgumentException) {
+            assertTrue(expected.message.orEmpty().contains("future", ignoreCase = true))
+        }
     }
 
     @Test

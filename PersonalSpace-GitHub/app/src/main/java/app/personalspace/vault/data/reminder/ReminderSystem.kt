@@ -2,6 +2,7 @@ package app.personalspace.vault.data.reminder
 
 import android.Manifest
 import android.app.AlarmManager
+import android.util.Log
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -18,7 +19,9 @@ import app.personalspace.vault.core.common.IdGenerator
 import app.personalspace.vault.core.common.TimeProvider
 import app.personalspace.vault.core.security.VaultLockState
 import app.personalspace.vault.core.security.VaultSessionManager
+import app.personalspace.vault.data.local.db.PersonalSpaceDatabase
 import app.personalspace.vault.data.local.db.VaultDatabaseHolder
+import app.personalspace.vault.data.local.entity.ReminderEntity
 import app.personalspace.vault.data.local.entity.ReminderOccurrenceEntity
 import app.personalspace.vault.data.local.entity.TimelineEventEntity
 import app.personalspace.vault.data.local.preferences.UserPreferencesDataSource
@@ -30,6 +33,7 @@ import app.personalspace.vault.domain.model.TimelineEventType
 import app.personalspace.vault.presentation.MainActivity
 import dagger.hilt.android.AndroidEntryPoint
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -40,34 +44,110 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
 import java.time.Instant
+import java.time.YearMonth
 import java.time.ZoneId
 import java.time.ZonedDateTime
+import java.time.temporal.ChronoUnit
 import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
+ * Broadcast receivers must never crash the app because a DB read, enum value, or notification call
+ * failed. `goAsync()` still finishes in the receivers' `finally` blocks.
+ */
+private val reminderReceiverErrorHandler = CoroutineExceptionHandler { _, error ->
+    Log.e("PersonalSpaceReminders", "Reminder receiver work failed", error)
+}
+
+private fun parseReminderPriority(value: String?): ReminderPriority =
+    ReminderPriority.entries.firstOrNull { it.name == value } ?: ReminderPriority.MEDIUM
+
+private fun parseRecurrenceType(value: String?): RecurrenceType =
+    RecurrenceType.entries.firstOrNull { it.name == value } ?: RecurrenceType.ONCE
+
+/**
+ * The original day-of-month is not stored in the Room entity. Prefer the alarm mirror (explicitly
+ * reset when the user edits a reminder), then the first logged occurrence, then the current date.
+ * This keeps "31st" monthly reminders from drifting after a clamped February without a DB migration.
+ */
+internal suspend fun resolveMonthlyAnchorDay(
+    db: PersonalSpaceDatabase,
+    scheduler: AlarmReminderScheduler,
+    entity: ReminderEntity,
+    zoneId: ZoneId
+): Int = scheduler.mirroredMonthlyAnchorDay(entity.id)
+    ?: db.reminderDao().getEarliestOccurrenceScheduledMillis(entity.id)?.let {
+        Instant.ofEpochMilli(it).atZone(zoneId).dayOfMonth
+    }
+    ?: Instant.ofEpochMilli(entity.scheduledAtMillis).atZone(zoneId).dayOfMonth
+
+/**
  * Pure recurrence calculator handling calendar edge cases (e.g. Jan 31 -> Feb 28/29, DST shifts).
+ *
+ * The old 1000-iteration loop returned a PAST timestamp for a daily reminder more than ~2.7 years
+ * overdue, and repeatedly applying `plusMonths` to a clamped Feb 28 drifted a "31st" reminder to
+ * the 28th forever. This version jumps arithmetically and preserves the caller-supplied original
+ * day-of-month for monthly recurrences.
  */
 object ReminderRecurrenceCalculator {
     fun computeNextOccurrenceMillis(
         currentScheduledMillis: Long,
         recurrence: RecurrenceType,
         nowMillis: Long,
-        zoneId: ZoneId = ZoneId.systemDefault()
+        zoneId: ZoneId = ZoneId.systemDefault(),
+        /** Original day-of-month for MONTHLY (1..31). Null = derive from currentScheduledMillis. */
+        monthlyAnchorDay: Int? = null
     ): Long? {
         if (recurrence == RecurrenceType.ONCE) return null
-        var cursor: ZonedDateTime = Instant.ofEpochMilli(currentScheduledMillis).atZone(zoneId)
-        var safety = 0
-        do {
-            cursor = when (recurrence) {
-                RecurrenceType.ONCE -> return null
-                RecurrenceType.DAILY -> cursor.plusDays(1)
-                RecurrenceType.WEEKLY -> cursor.plusWeeks(1)
-                RecurrenceType.MONTHLY -> cursor.plusMonths(1)
-            }
-            safety++
-        } while (cursor.toInstant().toEpochMilli() <= nowMillis && safety < 1000)
-        return cursor.toInstant().toEpochMilli()
+        val start = Instant.ofEpochMilli(currentScheduledMillis).atZone(zoneId)
+        val now = Instant.ofEpochMilli(nowMillis).atZone(zoneId)
+        val anchorDay = monthlyAnchorDay?.takeIf { it in 1..31 } ?: start.dayOfMonth
+
+        // Jump close to `now` in one step instead of looping thousands of times. We always advance
+        // at least one period: the caller has just handled the occurrence at currentScheduledMillis.
+        var periods = when (recurrence) {
+            RecurrenceType.ONCE -> return null
+            RecurrenceType.DAILY -> ChronoUnit.DAYS.between(start.toLocalDate(), now.toLocalDate())
+            RecurrenceType.WEEKLY -> ChronoUnit.WEEKS.between(start.toLocalDate(), now.toLocalDate())
+            RecurrenceType.MONTHLY -> ChronoUnit.MONTHS.between(YearMonth.from(start), YearMonth.from(now))
+        }.coerceAtLeast(1L)
+
+        var candidate = occurrenceAt(periods, start, recurrence, anchorDay, zoneId)
+        // The arithmetic estimate can be one period short because of time-of-day or month clamping.
+        // A tiny correction loop is enough; NEVER return a past trigger (AlarmManager fires it
+        // immediately and the receiver could then loop forever).
+        var corrections = 0
+        while (candidate.toInstant().toEpochMilli() <= nowMillis && corrections < 4) {
+            periods++
+            candidate = occurrenceAt(periods, start, recurrence, anchorDay, zoneId)
+            corrections++
+        }
+        val candidateMillis = candidate.toInstant().toEpochMilli()
+        if (candidateMillis <= nowMillis) {
+            // Defensive fallback for pathological clock/date values: still keep the reminder alive.
+            return nowMillis + 60_000L
+        }
+        return candidateMillis
+    }
+
+    private fun occurrenceAt(
+        periods: Long,
+        start: ZonedDateTime,
+        recurrence: RecurrenceType,
+        anchorDay: Int,
+        zoneId: ZoneId
+    ): ZonedDateTime = when (recurrence) {
+        RecurrenceType.ONCE -> start
+        RecurrenceType.DAILY -> start.plusDays(periods)
+        RecurrenceType.WEEKLY -> start.plusWeeks(periods)
+        RecurrenceType.MONTHLY -> {
+            // Rebuild from the ORIGINAL day-of-month so a clamped Feb 28 still yields Mar 31.
+            val targetMonth = YearMonth.from(start).plusMonths(periods)
+            val day = anchorDay.coerceAtMost(targetMonth.lengthOfMonth())
+            targetMonth.atDay(day)
+                .atTime(start.toLocalTime())
+                .atZone(zoneId)
+        }
     }
 }
 
@@ -81,7 +161,10 @@ object ReminderRecurrenceCalculator {
 data class PendingAlarmMirrorEntry(
     val reminderId: String,
     val triggerAtMillis: Long,
-    val priority: String
+    val priority: String,
+    /** Stored so MONTHLY reminders keep their original day (Jan 31 -> Feb 28 -> Mar 31). */
+    val recurrenceType: String = "ONCE",
+    val monthlyAnchorDay: Int = 0
 )
 
 @Singleton
@@ -121,7 +204,11 @@ class AlarmReminderScheduler @Inject constructor(
      * honestly to setAndAllowWhileIdle when exact alarm permission is denied.
      * Returns true if scheduled as an exact alarm, false if scheduled via best-effort fallback.
      */
-    fun scheduleReminder(reminder: ReminderItem): Boolean {
+    fun scheduleReminder(
+        reminder: ReminderItem,
+        /** Set when the user explicitly chooses a NEW schedule; preserves the monthly anchor otherwise. */
+        resetRecurrenceAnchor: Boolean = false
+    ): Boolean {
         if (reminder.status == ReminderStatus.COMPLETED || reminder.status == ReminderStatus.MISSED) {
             cancelReminder(reminder.id)
             return false
@@ -134,40 +221,71 @@ class AlarmReminderScheduler @Inject constructor(
             priority = reminder.priority.name
         )
 
-        val isExact = canScheduleExactAlarms()
+        // Persist the original day-of-month. `currentScheduledMillis` is clamped for short months,
+        // so re-deriving the anchor from every new trigger would turn "31st" into "28th" forever.
+        val existingEntry = readMirrorEntries().firstOrNull { it.reminderId == reminder.id }
+        val anchorDay = if (resetRecurrenceAnchor) {
+            Instant.ofEpochMilli(triggerAt).atZone(timeProvider.zoneId()).dayOfMonth
+        } else {
+            existingEntry?.monthlyAnchorDay?.takeIf { it in 1..31 }
+                ?: Instant.ofEpochMilli(triggerAt).atZone(timeProvider.zoneId()).dayOfMonth
+        }
+        val mirrorEntry = PendingAlarmMirrorEntry(
+            reminderId = reminder.id,
+            triggerAtMillis = triggerAt,
+            priority = reminder.priority.name,
+            recurrenceType = reminder.recurrence.name,
+            monthlyAnchorDay = anchorDay
+        )
+
+        var exactScheduled = false
+        var scheduled = false
         try {
-            if (isExact) {
+            if (canScheduleExactAlarms()) {
                 am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pendingIntent)
+                exactScheduled = true
             } else {
                 am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pendingIntent)
             }
-            upsertMirrorEntry(
-                PendingAlarmMirrorEntry(
-                    reminderId = reminder.id,
-                    triggerAtMillis = triggerAt,
-                    priority = reminder.priority.name
-                )
-            )
+            scheduled = true
         } catch (_: SecurityException) {
-            am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pendingIntent)
-            return false
+            // Exact-alarm permission can be revoked without the app being restarted. The fallback
+            // MUST still update the mirror or this reminder disappears after the next reboot.
+            runCatching {
+                am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pendingIntent)
+                scheduled = true
+            }
         }
-        return isExact
+        if (scheduled) upsertMirrorEntry(mirrorEntry)
+        return exactScheduled
     }
 
+    /** Returns the persisted monthly anchor, or null when this reminder has no valid mirror entry. */
+    fun mirroredMonthlyAnchorDay(reminderId: String): Int? =
+        readMirrorEntries().firstOrNull { it.reminderId == reminderId }
+            ?.monthlyAnchorDay
+            ?.takeIf { it in 1..31 }
+
     fun cancelReminder(reminderId: String) {
+        removeMirrorEntries(setOf(reminderId))
         val am = alarmManager ?: return
         val pi = buildAlarmPendingIntent(reminderId, titleHint = null, priority = "MEDIUM")
         am.cancel(pi)
-        removeMirrorEntry(reminderId)
     }
 
     fun rescheduleFromMirrorOnBoot() {
-        val am = alarmManager ?: return
         val now = timeProvider.nowMillis()
         val entries = readMirrorEntries()
+        // A trigger older than the grace window has already been handled (or will be marked MISSED
+        // by refreshMissedReminders once the vault is unlocked). Prune it even if AlarmManager is
+        // unavailable, so the mirror file cannot grow forever.
+        val staleIds = entries.filter { it.triggerAtMillis <= now - 60_000L }
+            .mapTo(HashSet<String>()) { it.reminderId }
+        removeMirrorEntries(staleIds)
+
+        val am = alarmManager ?: return
         val exactAllowed = canScheduleExactAlarms()
-        entries.filter { it.triggerAtMillis > now - 60_000L }.forEach { entry ->
+        entries.filter { it.reminderId !in staleIds }.forEach { entry ->
             val pi = buildAlarmPendingIntent(entry.reminderId, titleHint = null, priority = entry.priority)
             runCatching {
                 if (exactAllowed) {
@@ -209,15 +327,25 @@ class AlarmReminderScheduler @Inject constructor(
     }
 
     private fun upsertMirrorEntry(entry: PendingAlarmMirrorEntry) {
-        mirrorFile.parentFile?.mkdirs()
         val updated = readMirrorEntries().filterNot { it.reminderId == entry.reminderId } + entry
-        mirrorFile.writeText(json.encodeToString(updated), Charsets.UTF_8)
+        writeMirrorEntries(updated)
     }
 
-    private fun removeMirrorEntry(reminderId: String) {
-        if (!mirrorFile.exists()) return
-        val updated = readMirrorEntries().filterNot { it.reminderId == reminderId }
-        mirrorFile.writeText(json.encodeToString(updated), Charsets.UTF_8)
+    private fun removeMirrorEntries(reminderIds: Set<String>) {
+        if (reminderIds.isEmpty() || !mirrorFile.exists()) return
+        val updated = readMirrorEntries().filterNot { it.reminderId in reminderIds }
+        writeMirrorEntries(updated)
+    }
+
+    private fun writeMirrorEntries(entries: List<PendingAlarmMirrorEntry>) {
+        mirrorFile.parentFile?.mkdirs()
+        // tmp + rename so a crash while writing cannot truncate every boot-time alarm entry.
+        val tmp = File(mirrorFile.parentFile, "${mirrorFile.name}.tmp")
+        tmp.writeText(json.encodeToString(entries), Charsets.UTF_8)
+        if (!tmp.renameTo(mirrorFile)) {
+            tmp.copyTo(mirrorFile, overwrite = true)
+            tmp.delete()
+        }
     }
 }
 
@@ -247,7 +375,9 @@ class ReminderNotificationHelper @Inject constructor(
         reminderId: String,
         displayTitle: String,
         subtitle: String,
-        priority: ReminderPriority
+        priority: ReminderPriority,
+        /** Locked vault cannot mutate the encrypted DB, so do not offer a no-op Complete action. */
+        showCompleteAction: Boolean = true
     ) {
         ensureChannelCreated()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
@@ -303,8 +433,15 @@ class ReminderNotificationHelper @Inject constructor(
             .setCategory(NotificationCompat.CATEGORY_REMINDER)
             .setAutoCancel(true)
             .setContentIntent(contentPi)
-            .addAction(0, context.getString(R.string.action_complete), completePi)
-            .addAction(0, context.getString(R.string.action_snooze), snoozePi)
+            .apply {
+                if (showCompleteAction) {
+                    addAction(0, context.getString(R.string.action_complete), completePi)
+                } else {
+                    // Tapping either the notification or this action opens the unlock flow.
+                    addAction(0, context.getString(R.string.action_unlock), contentPi)
+                }
+                addAction(0, context.getString(R.string.action_snooze), snoozePi)
+            }
             .build()
 
         NotificationManagerCompat.from(context).notify(reminderId.hashCode(), notification)
@@ -330,11 +467,10 @@ class ReminderAlarmReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent?) {
         val reminderId = intent?.getStringExtra(EXTRA_REMINDER_ID) ?: return
-        val priorityStr = intent.getStringExtra(EXTRA_PRIORITY) ?: "MEDIUM"
-        val priority = ReminderPriority.entries.firstOrNull { it.name == priorityStr } ?: ReminderPriority.MEDIUM
+        val priority = parseReminderPriority(intent.getStringExtra(EXTRA_PRIORITY))
 
         val pendingResult = goAsync()
-        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+        CoroutineScope(SupervisorJob() + Dispatchers.IO + reminderReceiverErrorHandler).launch {
             try {
                 if (sessionManager.lockState.value == VaultLockState.UNLOCKED) {
                     val entity = dbHolder.getDatabase().reminderDao().getReminderById(reminderId)
@@ -347,12 +483,14 @@ class ReminderAlarmReceiver : BroadcastReceiver() {
                         )
                     }
                 } else {
-                    // Vault is locked: protect private title while still alerting user reliably
+                    // Vault is locked: protect private title, and DO NOT show a Complete action that
+                    // would silently do nothing against the encrypted database.
                     notificationHelper.postReminderNotification(
                         reminderId = reminderId,
                         displayTitle = "Personal Space Reminder",
-                        subtitle = "Unlock your vault to view reminder details",
-                        priority = priority
+                        subtitle = context.getString(R.string.reminder_locked_complete_hint),
+                        priority = priority,
+                        showCompleteAction = false
                     )
                 }
             } finally {
@@ -380,12 +518,14 @@ class ReminderActionReceiver : BroadcastReceiver() {
         val reminderId = intent?.getStringExtra(ReminderAlarmReceiver.EXTRA_REMINDER_ID) ?: return
         val action = intent.action ?: return
         notificationHelper.dismissNotification(reminderId)
+        val actionPriority = parseReminderPriority(intent.getStringExtra(ReminderAlarmReceiver.EXTRA_PRIORITY))
 
         val pendingResult = goAsync()
-        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+        CoroutineScope(SupervisorJob() + Dispatchers.IO + reminderReceiverErrorHandler).launch {
             try {
                 if (sessionManager.lockState.value != VaultLockState.UNLOCKED) {
-                    // If vault is locked and user taps Snooze, reschedule alarm 10 minutes out via mirror
+                    // Snooze works without the encrypted DB; completion does not. Do not silently
+                    // swallow Complete: restore an unlock-only notification with a clear hint.
                     if (action == ACTION_SNOOZE) {
                         val snoozeMin = prefs.settingsFlow.first().defaultSnoozeMinutes
                         val trigger = timeProvider.nowMillis() + snoozeMin * 60_000L
@@ -399,6 +539,14 @@ class ReminderActionReceiver : BroadcastReceiver() {
                                 createdAt = trigger,
                                 modifiedAt = trigger
                             )
+                        )
+                    } else if (action == ACTION_COMPLETE) {
+                        notificationHelper.postReminderNotification(
+                            reminderId = reminderId,
+                            displayTitle = "Personal Space Reminder",
+                            subtitle = context.getString(R.string.reminder_locked_complete_hint),
+                            priority = actionPriority,
+                            showCompleteAction = false
                         )
                     }
                     return@launch
@@ -420,13 +568,14 @@ class ReminderActionReceiver : BroadcastReceiver() {
                             outcome = ReminderStatus.COMPLETED.name
                         )
                     )
-                    val recurrence = RecurrenceType.entries.firstOrNull { it.name == entity.recurrenceType }
-                        ?: RecurrenceType.ONCE
+                    val recurrence = parseRecurrenceType(entity.recurrenceType)
+                    val anchorDay = resolveMonthlyAnchorDay(db, scheduler, entity, timeProvider.zoneId())
                     val nextMillis = ReminderRecurrenceCalculator.computeNextOccurrenceMillis(
                         currentScheduledMillis = entity.scheduledAtMillis,
                         recurrence = recurrence,
                         nowMillis = now,
-                        zoneId = timeProvider.zoneId()
+                        zoneId = timeProvider.zoneId(),
+                        monthlyAnchorDay = anchorDay
                     )
                     val updated = if (nextMillis != null) {
                         entity.copy(
@@ -463,7 +612,7 @@ class ReminderActionReceiver : BroadcastReceiver() {
                                 title = updated.title,
                                 scheduledAtMillis = nextMillis,
                                 recurrence = recurrence,
-                                priority = ReminderPriority.valueOf(updated.priority),
+                                priority = parseReminderPriority(updated.priority),
                                 status = ReminderStatus.PENDING,
                                 createdAt = updated.createdAt,
                                 modifiedAt = now
@@ -499,7 +648,7 @@ class ReminderActionReceiver : BroadcastReceiver() {
                             scheduledAtMillis = updated.scheduledAtMillis,
                             snoozedUntilMillis = snoozeUntil,
                             status = ReminderStatus.SNOOZED,
-                            priority = ReminderPriority.valueOf(updated.priority),
+                            priority = parseReminderPriority(updated.priority),
                             createdAt = updated.createdAt,
                             modifiedAt = now
                         )
@@ -520,7 +669,7 @@ class BootAndTimeChangeReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent?) {
         val pendingResult = goAsync()
-        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+        CoroutineScope(SupervisorJob() + Dispatchers.IO + reminderReceiverErrorHandler).launch {
             try {
                 if (sessionManager.lockState.value == VaultLockState.UNLOCKED) {
                     val reminders = dbHolder.getDatabase().reminderDao().getAllActiveReminders()

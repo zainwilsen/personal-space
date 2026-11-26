@@ -98,6 +98,7 @@ import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.material3.rememberTimePickerState
 import java.time.Instant
 import java.time.ZoneId
+import java.time.ZoneOffset
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -3747,9 +3748,15 @@ fun NoteReminderDialog(
     val dateState = rememberDatePickerState()
     val timeState = rememberTimePickerState(is24Hour = true)
     var showTimePicker by remember { mutableStateOf(false) }
+    var validationError by remember { mutableStateOf<String?>(null) }
     val zone = ZoneId.systemDefault()
     val selectedMillis = dateState.selectedDateMillis ?: System.currentTimeMillis()
-    val selectedDate = Instant.ofEpochMilli(selectedMillis).atZone(zone).toLocalDate()
+    // Material3 DatePickerState returns UTC midnight. Converting that instant directly with the
+    // local zone shifts UTC− timezones to the PREVIOUS day; interpret the calendar date in UTC.
+    val selectedDate = Instant.ofEpochMilli(selectedMillis).atZone(ZoneOffset.UTC).toLocalDate()
+    val selectedDateDisplayMillis = selectedDate.atStartOfDay(zone).toInstant().toEpochMilli()
+    val selectedDateLabel = DateFormatters.formatDate(selectedDateDisplayMillis)
+        .takeIf { it != "—" } ?: selectedDate.toString()
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -3766,7 +3773,7 @@ fun NoteReminderDialog(
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     ReminderChoiceChip(
-                        label = DateFormatters.formatDate(selectedMillis),
+                        label = selectedDateLabel,
                         selected = !showTimePicker,
                         onClick = { showTimePicker = false },
                         modifier = Modifier.weight(1f),
@@ -3781,6 +3788,14 @@ fun NoteReminderDialog(
                     )
                 }
                 Spacer(modifier = Modifier.height(10.dp))
+                validationError?.let { error ->
+                    Text(
+                        text = error,
+                        color = BauhausColors.Red,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                }
                 if (showTimePicker) {
                     Box(
                         modifier = Modifier.fillMaxWidth(),
@@ -3806,7 +3821,12 @@ fun NoteReminderDialog(
                         .atZone(zone)
                         .toInstant()
                         .toEpochMilli()
-                    onConfirm(triggerAt)
+                    if (triggerAt <= System.currentTimeMillis()) {
+                        validationError = "Choose a future date and time."
+                    } else {
+                        validationError = null
+                        onConfirm(triggerAt)
+                    }
                 }
             ) { Text("Set", color = BauhausColors.Red) }
         },

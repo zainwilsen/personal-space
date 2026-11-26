@@ -20,6 +20,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -96,11 +97,60 @@ class GoogleDriveAuthManager @Inject constructor(
         const val DRIVE_APPDATA_SCOPE = "https://www.googleapis.com/auth/drive.appdata"
         // Backups live in the hidden appDataFolder; drive.file keeps legacy project files readable.
         val REQUESTED_SCOPES = listOf(DRIVE_APPDATA_SCOPE, "https://www.googleapis.com/auth/drive.file")
+
+        /** Google access tokens are short-lived; stay deliberately under the usual 1-hour lifetime. */
+        const val SESSION_TTL_MILLIS = 55L * 60_000L
+        /** Refresh before the deadline so a long sync or upload never races the token expiry. */
+        private const val TOKEN_REFRESH_MARGIN_MILLIS = 5L * 60_000L
+        /** Do not hammer Play Services when a silent re-authorization needs fresh user consent. */
+        private const val SILENT_REFRESH_COOLDOWN_MILLIS = 5L * 60_000L
     }
+
+    @Volatile
+    private var lastSilentRefreshAttemptMillis: Long = 0L
+
+    /**
+     * Test seam for the Google Play Services authorization call. Null in production; JVM tests can
+     * substitute a consent/error outcome without starting an interactive OAuth flow.
+     */
+    @Volatile
+    var silentAuthorizationOverride: (suspend () -> DriveAuthOutcome)? = null
 
     fun getCurrentSession(): StoredDriveAuthSession? = encryptedTokenStore.readSession()
 
     fun isConnected(): Boolean = getCurrentSession()?.accessToken?.isNotBlank() == true
+
+    /**
+     * Returns a session that is usable for an API call, silently re-authorizing when the cached
+     * access token is about to expire.
+     *
+     * `expiresAtMillis` used to be written but never read: after ~1 hour every sync and the daily
+     * backup worker kept sending a dead token, got HTTP 401, and required a manual reconnect in
+     * Settings. Every caller that needs an access token must use this instead of [getCurrentSession].
+     *
+     * If Google requires fresh user consent (or Play Services is unavailable), the cached session is
+     * returned as-is on purpose: the following request then surfaces a real
+     * [DriveAuthExpiredException] with a clear "reconnect" message, instead of a silent fake
+     * "not connected" that hides a broken backup.
+     */
+    suspend fun getValidSession(): StoredDriveAuthSession? {
+        val session = getCurrentSession() ?: return null
+        if (session.accessToken.isBlank()) return null
+        val now = timeProvider.nowMillis()
+        if (session.expiresAtMillis > now + TOKEN_REFRESH_MARGIN_MILLIS) return session
+        val sinceLastAttempt = now - lastSilentRefreshAttemptMillis
+        if (lastSilentRefreshAttemptMillis > 0L &&
+            sinceLastAttempt in 0L until SILENT_REFRESH_COOLDOWN_MILLIS
+        ) return session
+
+        lastSilentRefreshAttemptMillis = now
+        val outcome = silentAuthorizationOverride?.invoke() ?: requestDriveAuthorization()
+        return when (outcome) {
+            is DriveAuthOutcome.Authorized -> getCurrentSession() ?: session
+            is DriveAuthOutcome.ConsentResolutionRequired,
+            is DriveAuthOutcome.ConfigurationOrError -> session
+        }
+    }
 
     suspend fun requestDriveAuthorization(): DriveAuthOutcome {
         return try {
@@ -166,7 +216,7 @@ class GoogleDriveAuthManager @Inject constructor(
                 accountEmail = accountEmail ?: encryptedTokenStore.readSession()?.accountEmail,
                 driveFolderId = driveFolderId,
                 obtainedAtMillis = now,
-                expiresAtMillis = now + 55 * 60_000L
+                expiresAtMillis = now + SESSION_TTL_MILLIS
             )
         )
     }
@@ -206,6 +256,8 @@ class OkHttpDriveRemoteDataSource @Inject constructor() : DriveRemoteDataSource 
         const val VAULT_FOLDER_NAME = "PersonalSpace_EncryptedVault"
         const val APP_DATA_SPACE = "appDataFolder"
         private const val FOLDER_MIME = "application/vnd.google-apps.folder"
+        /** Hard stop for a malicious/looping `nextPageToken` (100 pages x 1000 files). */
+        private const val MAX_LIST_PAGES = 100
     }
 
     override suspend fun ensureAppVaultFolder(accessToken: String): String = withContext(Dispatchers.IO) {
@@ -283,32 +335,21 @@ class OkHttpDriveRemoteDataSource @Inject constructor() : DriveRemoteDataSource 
         accessToken: String,
         namePrefix: String?
     ): List<RemoteDriveFile> = withContext(Dispatchers.IO) {
-        val prefixClause = if (!namePrefix.isNullOrBlank()) " and name contains '$namePrefix'" else ""
+        val prefixClause = if (!namePrefix.isNullOrBlank()) {
+            " and name contains '${escapeDriveQueryLiteral(namePrefix)}'"
+        } else ""
         // `spaces` is a separate request parameter, NOT a valid term inside `q`. Putting it in the
         // query string makes Drive reject the whole request with HTTP 400 "Invalid Value"
         // (location: "q"), which is what broke appDataFolder listing.
         val query = "trashed = false$prefixClause"
-        val url = "$baseApiUrl/drive/v3/files".toHttpUrl().newBuilder()
-            .addQueryParameter("q", query)
-            .addQueryParameter("spaces", APP_DATA_SPACE)
-            .addQueryParameter("pageSize", "1000")
-            .addQueryParameter("fields", "files(id, name, size, createdTime)")
-            .build()
-        val req = Request.Builder()
-            .url(url)
-            .header("Authorization", "Bearer $accessToken")
-            .get()
-            .build()
-        val text = executeWithRetry(req)
-        val arr = json.parseToJsonElement(text).jsonObject["files"]?.jsonArray ?: return@withContext emptyList()
-        arr.map { elem ->
-            val obj = elem.jsonObject
-            RemoteDriveFile(
-                id = obj["id"]!!.jsonPrimitive.content,
-                name = obj["name"]!!.jsonPrimitive.content,
-                sizeBytes = obj["size"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L,
-                createdTime = obj["createdTime"]?.jsonPrimitive?.content
-            )
+        listDriveFilesPaged(accessToken) { pageToken ->
+            "$baseApiUrl/drive/v3/files".toHttpUrl().newBuilder()
+                .addQueryParameter("q", query)
+                .addQueryParameter("spaces", APP_DATA_SPACE)
+                .addQueryParameter("pageSize", "1000")
+                .addQueryParameter("fields", "files(id, name, size, createdTime),nextPageToken")
+                .apply { if (pageToken != null) addQueryParameter("pageToken", pageToken) }
+                .build()
         }
     }
 
@@ -317,33 +358,67 @@ class OkHttpDriveRemoteDataSource @Inject constructor() : DriveRemoteDataSource 
         folderId: String,
         namePrefix: String?
     ): List<RemoteDriveFile> = withContext(Dispatchers.IO) {
-        val prefixClause = if (!namePrefix.isNullOrBlank()) " and name contains '$namePrefix'" else ""
+        val prefixClause = if (!namePrefix.isNullOrBlank()) {
+            " and name contains '${escapeDriveQueryLiteral(namePrefix)}'"
+        } else ""
         val query = "'$folderId' in parents and trashed = false$prefixClause"
-        val url = "$baseApiUrl/drive/v3/files".toHttpUrl().newBuilder()
-            .addQueryParameter("q", query)
-            .addQueryParameter("pageSize", "200")
-            .addQueryParameter("orderBy", "createdTime asc")
-            .addQueryParameter("fields", "files(id, name, size, createdTime)")
-            .build()
-
-        val req = Request.Builder()
-            .url(url)
-            .header("Authorization", "Bearer $accessToken")
-            .get()
-            .build()
-
-        val text = executeWithRetry(req)
-        val arr = json.parseToJsonElement(text).jsonObject["files"]?.jsonArray ?: return@withContext emptyList()
-        arr.map { elem ->
-            val obj = elem.jsonObject
-            RemoteDriveFile(
-                id = obj["id"]!!.jsonPrimitive.content,
-                name = obj["name"]!!.jsonPrimitive.content,
-                sizeBytes = obj["size"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L,
-                createdTime = obj["createdTime"]?.jsonPrimitive?.content
-            )
+        listDriveFilesPaged(accessToken) { pageToken ->
+            "$baseApiUrl/drive/v3/files".toHttpUrl().newBuilder()
+                .addQueryParameter("q", query)
+                .addQueryParameter("pageSize", "200")
+                .addQueryParameter("orderBy", "createdTime asc")
+                .addQueryParameter("fields", "files(id, name, size, createdTime),nextPageToken")
+                .apply { if (pageToken != null) addQueryParameter("pageToken", pageToken) }
+                .build()
         }
     }
+
+    /**
+     * Drive caps one `files.list` response at `pageSize` and returns `nextPageToken` for the rest.
+     * The old implementation read only the first page, so after 1000 appDataFolder bundles (or 200
+     * legacy visible-folder files) older sync events silently vanished for new devices. Follow the
+     * token until Drive says there are no more pages.
+     */
+    private suspend fun listDriveFilesPaged(
+        accessToken: String,
+        urlFactory: (pageToken: String?) -> HttpUrl
+    ): List<RemoteDriveFile> {
+        val result = ArrayList<RemoteDriveFile>()
+        var pageToken: String? = null
+        var pages = 0
+        do {
+            val req = Request.Builder()
+                .url(urlFactory(pageToken))
+                .header("Authorization", "Bearer $accessToken")
+                .get()
+                .build()
+            val root = json.parseToJsonElement(executeWithRetry(req)).jsonObject
+            root["files"]?.jsonArray?.forEach { elem ->
+                val obj = elem.jsonObject
+                val id = obj["id"]?.jsonPrimitive?.content ?: return@forEach
+                val name = obj["name"]?.jsonPrimitive?.content ?: return@forEach
+                result.add(
+                    RemoteDriveFile(
+                        id = id,
+                        name = name,
+                        sizeBytes = obj["size"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L,
+                        createdTime = obj["createdTime"]?.jsonPrimitive?.content
+                    )
+                )
+            }
+            pageToken = root["nextPageToken"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
+            pages++
+        } while (pageToken != null && pages < MAX_LIST_PAGES)
+        if (pageToken != null) {
+            // Never return a truncated list as if it were complete; surface the anomaly instead.
+            throw IOException("Drive file listing exceeded $MAX_LIST_PAGES pages; refusing to silently truncate sync history.")
+        }
+        return result
+    }
+
+    /** Drive `q` literals are single-quoted; escape backslashes and quotes from caller input. */
+    private fun escapeDriveQueryLiteral(value: String): String =
+        value.replace("\\", "\\\\").replace("'", "\\'")
 
     override suspend fun uploadEncryptedFileResumable(
         accessToken: String,

@@ -12,6 +12,7 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
+import app.personalspace.vault.core.common.IdGenerator
 import app.personalspace.vault.core.common.TimeProvider
 import app.personalspace.vault.core.security.VaultLockState
 import app.personalspace.vault.core.security.VaultSessionManager
@@ -67,11 +68,14 @@ class ScheduledDailyBackupWorker @AssistedInject constructor(
             // Defer cleanly until vault is next unlocked; never report a fake completed backup
             return if (runAttemptCount < 3) Result.retry() else Result.failure()
         }
-        val session = authManager.getCurrentSession()
-        if (session == null || session.accessToken.isBlank()) {
+        val storedSession = authManager.getCurrentSession()
+        if (storedSession == null || storedSession.accessToken.isBlank()) {
             // Not connected: nothing to upload, and a success would be a lie
             return Result.success()
         }
+        // Refresh a token that is about to expire instead of uploading with a dead one for the
+        // rest of the day (the cached `expiresAtMillis` used to be written but never read).
+        val session = authManager.getValidSession() ?: return Result.success()
         return try {
             val fingerprint = backupManager.computeVaultFingerprint()
             if (fingerprint == backupManager.lastBackupFingerprint()) {
@@ -99,8 +103,38 @@ class ScheduledDailyBackupWorker @AssistedInject constructor(
                 )
             )
             Result.success()
+        } catch (expired: DriveAuthExpiredException) {
+            // A dead OAuth token will never succeed on retry. Record a visible failure so the
+            // backup history cannot pretend the daily backup ran, and tell the user what to do.
+            recordFailedBackup(
+                "Google Drive authorization expired. Reconnect Drive in Settings to resume daily backups."
+            )
+            Result.failure()
         } catch (e: Exception) {
             if (runAttemptCount < 3) Result.retry() else Result.failure()
+        }
+    }
+
+    private suspend fun recordFailedBackup(message: String) {
+        try {
+            dbHolder.getDatabase().backupDao().upsert(
+                BackupMetadataEntity(
+                    backupId = IdGenerator.newUuid(),
+                    backupKind = BackupKind.FULL_SCHEDULED.name,
+                    destination = "GOOGLE_DRIVE",
+                    locationRef = "",
+                    sizeBytes = 0L,
+                    recordCount = 0,
+                    attachmentCount = 0,
+                    sha256Checksum = "",
+                    verified = false,
+                    succeeded = false,
+                    errorMessage = message,
+                    createdAtMillis = timeProvider.nowMillis()
+                )
+            )
+        } catch (_: Exception) {
+            // Never let a failed audit row mask the original authorization failure.
         }
     }
 }

@@ -336,6 +336,7 @@ class SettingsViewModel @Inject constructor(
                 .onSuccess {
                     _isBusy.value = false
                     _cloudBackup.value = _cloudBackup.value.copy(status = BackupStatus.RESTORE_COMPLETED)
+                    repository.invalidateCaches()
                     refreshLocalBackupInfo()
                     _message.value = restoreSummary(it)
                     onRestored()
@@ -364,6 +365,7 @@ class SettingsViewModel @Inject constructor(
                     )
                 }
                 _isBusy.value = false
+                repository.invalidateCaches()
                 refreshLocalBackupInfo()
                 _message.value = restoreSummary(result)
                 onRestored()
@@ -387,6 +389,7 @@ class SettingsViewModel @Inject constructor(
                 .onSuccess {
                     _isBusy.value = false
                     _cloudBackup.value = _cloudBackup.value.copy(status = BackupStatus.RESTORE_COMPLETED)
+                    repository.invalidateCaches()
                     refreshLocalBackupInfo()
                     _message.value = restoreSummary(it)
                     onRestored()
@@ -501,6 +504,7 @@ class SettingsViewModel @Inject constructor(
     fun currentVaultId(): String = vaultKeyManager.readEnvelopeBundle()?.vaultId ?: "—"
 
     fun lockVaultNow() {
+        repository.invalidateCaches()
         sessionManager.lockVault()
     }
 

@@ -265,6 +265,10 @@ interface ReminderDao {
     @Query("SELECT * FROM reminder_occurrences")
     suspend fun getAllOccurrences(): List<ReminderOccurrenceEntity>
 
+    /** First handled occurrence preserves the original MONTHLY day-of-month if the mirror is lost. */
+    @Query("SELECT MIN(occurrenceScheduledMillis) FROM reminder_occurrences WHERE reminderId = :reminderId")
+    suspend fun getEarliestOccurrenceScheduledMillis(reminderId: String): Long?
+
     @Upsert
     suspend fun upsert(reminder: ReminderEntity)
 
@@ -365,6 +369,19 @@ interface SyncDao {
 
     @Upsert
     suspend fun insertOperation(op: SyncOperationEntity)
+
+    @Upsert
+    suspend fun insertOperations(ops: List<SyncOperationEntity>)
+
+    /** Restore replaces the whole local vault: old pending ops/tombstones must never be uploaded. */
+    @Query("DELETE FROM sync_operations")
+    suspend fun deleteAllOperations()
+
+    @Query("DELETE FROM conflict_records")
+    suspend fun deleteAllConflicts()
+
+    @Query("DELETE FROM sync_devices")
+    suspend fun deleteAllDevices()
 
     @Query("SELECT * FROM sync_operations WHERE bundledInChangeId IS NULL ORDER BY timestampMillis ASC")
     suspend fun getPendingOperations(): List<SyncOperationEntity>
