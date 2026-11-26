@@ -5,4 +5,6 @@
     <string name="reminder_channel_description">Scheduled personal reminders from Personal Space</string>
     <string name="action_complete">Mark Completed</string>
     <string name="action_snooze">Snooze</string>
+    <string name="action_unlock">Unlock</string>
+    <string name="reminder_locked_complete_hint">Unlock your vault to complete this reminder</string>
 </resources>

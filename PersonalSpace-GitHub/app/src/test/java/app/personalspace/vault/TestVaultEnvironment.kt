@@ -238,7 +238,8 @@ class IsolatedVaultTestRig(
         dbHolder = dbHolder,
         attachmentStorage = attachmentStorage,
         inlineImageStore = inlineImageStore,
-        timeProvider = clock
+        timeProvider = clock,
+        preferences = preferences
     )
     /** P3.1: the same coordinator Hilt would inject into Application/Activity. */
     val recoveryCoordinator = app.personalspace.vault.data.backup.RestoreRecoveryCoordinator(context, dbHolder)

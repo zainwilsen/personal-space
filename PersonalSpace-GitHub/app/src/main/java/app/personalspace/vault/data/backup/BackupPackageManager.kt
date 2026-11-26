@@ -32,8 +32,11 @@ import app.personalspace.vault.data.local.entity.RecordEntity
 import app.personalspace.vault.data.local.entity.RecordVersionEntity
 import app.personalspace.vault.data.local.entity.ReminderEntity
 import app.personalspace.vault.data.local.entity.ReminderOccurrenceEntity
+import app.personalspace.vault.data.local.entity.SyncMetadataEntity
+import app.personalspace.vault.data.local.entity.SyncOperationEntity
 import app.personalspace.vault.data.local.entity.TimelineEventEntity
 import app.personalspace.vault.data.local.entity.VaultMetadataEntity
+import app.personalspace.vault.data.local.preferences.UserPreferencesDataSource
 import app.personalspace.vault.domain.model.BackupKind
 import app.personalspace.vault.domain.model.TimelineEventType
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -316,7 +319,9 @@ class BackupPackageManager @Inject constructor(
     private val dbHolder: VaultDatabaseHolder,
     private val attachmentStorage: EncryptedAttachmentStorage,
     private val inlineImageStore: InlineImageStore,
-    private val timeProvider: TimeProvider
+    private val timeProvider: TimeProvider,
+    /** Needed to stamp the re-baselined sync outbox with this device's identity after a restore. */
+    private val preferences: UserPreferencesDataSource
 ) {
     private val json = Json {
         ignoreUnknownKeys = true
@@ -473,6 +478,8 @@ class BackupPackageManager @Inject constructor(
             val records = db.recordDao().getAllRecordsIncludingDeleted()
             val versions = db.recordDao().getAllVersions()
             val attachments = db.attachmentDao().getAllAttachmentsIncludingDeleted()
+            // INTENTIONAL: Reminders are device-local by design — never exported to backups or sync.
+            // Restore deliberately leaves the destination device's own reminders untouched.
             val reminders = emptyList<app.personalspace.vault.data.local.entity.ReminderEntity>()
             val occurrences = emptyList<app.personalspace.vault.data.local.entity.ReminderOccurrenceEntity>()
             val deletedBatches = db.recycleBinDao().getAllDeletedItems()
@@ -952,6 +959,9 @@ class BackupPackageManager @Inject constructor(
                 FailureInjection.hit(STAGE_PRE_DB_TRANSACTION)
                 journal.advance(RestorePhase.DB_TXN)
                 FailureInjection.hit(STAGE_INSTALL_ATTACHMENTS)
+                // Resolve the device identity outside the transaction: it is a DataStore read/write.
+                val restoreDeviceId = preferences.getOrCreateDeviceIdentity().first
+                val restoreStamp = timeProvider.nowMillis()
                 db.withTransaction {
                     FailureInjection.hit(STAGE_DB_TRANSACTION)
                     db.recordDao().deleteAllDrafts()
@@ -961,7 +971,10 @@ class BackupPackageManager @Inject constructor(
                     db.timelineDao().deleteAll()
                     db.recordDao().deleteAllRecords()
                     db.folderDao().deleteAllFolders()
+                    // Sync state is part of the replaced vault, not persistent device state.
+                    resetSyncStateAfterRestore(db)
                     insertSnapshotInto(db, snapshot)
+                    enqueueRestoredContentOps(db, snapshot, restoreDeviceId, restoreStamp)
                 }
 
                 FailureInjection.hit(STAGE_VERIFICATION)
@@ -1295,7 +1308,65 @@ class BackupPackageManager @Inject constructor(
         }
     }
 
+    /**
+     * A successful restore REPLACES the local content set, so all sync bookkeeping of the previous
+     * vault becomes invalid:
+     *  - pending `sync_operations` (especially TOMBSTONEs) would be uploaded against rows that no
+     *    longer exist here and could delete the just-restored content on other devices;
+     *  - `appliedBundleIdsJson` / last-synced state from the old vault would make this device skip
+     *    remote events that belong to the restored baseline;
+     *  - conflicts and device rows refer to the old content set.
+     *
+     * NOTE: `reminders` and `reminder_occurrences` are deliberately NOT touched here — they are
+     * device-local by design and are intentionally excluded from backups.
+     */
+    private suspend fun resetSyncStateAfterRestore(db: PersonalSpaceDatabase) {
+        val syncDao = db.syncDao()
+        syncDao.deleteAllOperations()
+        syncDao.deleteAllConflicts()
+        syncDao.deleteAllDevices()
+        syncDao.upsertSyncMetadata(SyncMetadataEntity())
+    }
+
+    /**
+     * Publishes the restored rows to other devices on the next sync cycle. Without this, a restore
+     * only changes this phone while every other device keeps the pre-restore content indefinitely.
+     * Rows themselves keep `syncPending = false` (the restore is verified as a clean baseline);
+     * the queued UPSERT bundle is what carries the new baseline to peers.
+     */
+    private suspend fun enqueueRestoredContentOps(
+        db: PersonalSpaceDatabase,
+        snapshot: VaultSnapshotPayload,
+        deviceId: String,
+        now: Long
+    ) {
+        val ops = ArrayList<SyncOperationEntity>(
+            snapshot.folders.size + snapshot.records.size + snapshot.attachments.size
+        )
+        fun add(entityType: String, entityId: String, version: Long, payload: String) {
+            ops.add(
+                SyncOperationEntity(
+                    operationId = IdGenerator.newUuid(),
+                    entityType = entityType,
+                    entityId = entityId,
+                    operationType = "UPSERT",
+                    baseVersion = 0L,
+                    newVersion = version,
+                    deviceId = deviceId,
+                    timestampMillis = now,
+                    payloadJson = payload
+                )
+            )
+        }
+        snapshot.folders.forEach { add("FOLDER", it.id, it.syncVersion, json.encodeToString(it)) }
+        snapshot.records.forEach { add("RECORD", it.id, it.syncVersion, json.encodeToString(it)) }
+        snapshot.attachments.forEach { add("ATTACHMENT", it.id, it.syncVersion, json.encodeToString(it)) }
+        if (ops.isNotEmpty()) db.syncDao().insertOperations(ops)
+    }
+
     private suspend fun insertSnapshotInto(db: PersonalSpaceDatabase, snapshot: VaultSnapshotPayload) {
+        // INTENTIONAL: snapshot.reminders / reminderOccurrences are not inserted here. Restoring a
+        // backup must not overwrite the destination device's own local reminders.
         db.folderDao().upsertAll(
             orderFoldersTopologically(snapshot.folders).map {
                 FolderEntity(

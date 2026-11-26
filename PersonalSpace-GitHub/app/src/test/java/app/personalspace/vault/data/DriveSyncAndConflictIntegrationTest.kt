@@ -4,6 +4,8 @@ import androidx.test.core.app.ApplicationProvider
 import app.personalspace.vault.FakeSharedDriveCloud
 import app.personalspace.vault.IsolatedVaultTestRig
 import app.personalspace.vault.data.sync.DriveAuthExpiredException
+import app.personalspace.vault.data.sync.DriveAuthOutcome
+import app.personalspace.vault.data.sync.GoogleDriveAuthManager
 import app.personalspace.vault.data.sync.OkHttpDriveRemoteDataSource
 import app.personalspace.vault.domain.model.ConflictKind
 import app.personalspace.vault.domain.model.ConflictResolutionChoice
@@ -16,6 +18,7 @@ import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
@@ -46,6 +49,88 @@ class DriveSyncAndConflictIntegrationTest {
     fun tearDown() {
         deviceA.close()
         deviceB.close()
+    }
+
+    @Test
+    fun `Drive file listings follow nextPageToken in both appDataFolder and legacy folder queries`() = runBlocking {
+        val server = MockWebServer()
+        server.start()
+        try {
+            val client = OkHttpDriveRemoteDataSource().apply {
+                baseApiUrl = server.url("").toString().trimEnd('/')
+            }
+
+            // Page 1 of appDataFolder -> page 2. The old implementation returned only page 1 and
+            // silently lost every sync bundle after the first 1000 results.
+            server.enqueue(
+                MockResponse().setResponseCode(200).setBody(
+                    """{"files":[{"id":"app_page1","name":"psbundle_a.psbundle","size":"1"}],"nextPageToken":"APP_PAGE_2"}"""
+                )
+            )
+            server.enqueue(
+                MockResponse().setResponseCode(200).setBody(
+                    """{"files":[{"id":"app_page2","name":"psbundle_b.psbundle","size":"2"}]}"""
+                )
+            )
+            val appDataFiles = client.listAppDataFiles("token", "psbundle_")
+            assertEquals(listOf("app_page1", "app_page2"), appDataFiles.map { it.id })
+
+            val firstAppDataRequest = server.takeRequest()
+            assertTrue(firstAppDataRequest.path!!.contains("spaces=appDataFolder"))
+            assertTrue(firstAppDataRequest.path!!.contains("nextPageToken"))
+            val secondAppDataRequest = server.takeRequest()
+            assertTrue(secondAppDataRequest.path!!.contains("pageToken=APP_PAGE_2"))
+
+            // Legacy visible-folder listing has its own URL builder; cover that branch too.
+            server.enqueue(
+                MockResponse().setResponseCode(200).setBody(
+                    """{"files":[{"id":"folder_page1","name":"psbundle_c.psbundle","size":"3"}],"nextPageToken":"FOLDER_PAGE_2"}"""
+                )
+            )
+            server.enqueue(
+                MockResponse().setResponseCode(200).setBody(
+                    """{"files":[{"id":"folder_page2","name":"psbundle_d.psbundle","size":"4"}]}"""
+                )
+            )
+            val folderFiles = client.listFilesInFolder("token", "legacy-folder", "psbundle_")
+            assertEquals(listOf("folder_page1", "folder_page2"), folderFiles.map { it.id })
+            server.takeRequest()
+            val secondFolderRequest = server.takeRequest()
+            assertTrue(secondFolderRequest.path!!.contains("pageToken=FOLDER_PAGE_2"))
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `getValidSession keeps a near-expiry session available when silent reauthorization needs consent`() = runBlocking {
+        deviceA.initializeAndUnlockVault()
+        deviceA.authManager.persistAccessToken("short-lived-token", "user@example.com")
+        // Simulate Play Services requiring fresh UI consent (no interactive OAuth in a JVM test).
+        deviceA.authManager.silentAuthorizationOverride = {
+            DriveAuthOutcome.ConfigurationOrError("Fresh consent required")
+        }
+        val fresh = deviceA.authManager.getValidSession()
+        assertNotNull(fresh)
+        assertEquals("short-lived-token", fresh!!.accessToken)
+
+        // After the TTL, Google Play Services may require fresh UI consent in this headless test.
+        // getValidSession() must NOT report "not connected": the ensuing API call should surface a
+        // real 401/reconnect error rather than hiding a broken daily backup.
+        deviceA.clock.advanceBy(GoogleDriveAuthManager.SESSION_TTL_MILLIS + 1L)
+        val nearExpiry = deviceA.authManager.getValidSession()
+        assertNotNull(nearExpiry)
+        assertEquals("short-lived-token", nearExpiry!!.accessToken)
+
+        // Once silent authorization succeeds, call sites receive the newly persisted token.
+        deviceA.clock.advanceBy(10L * 60_000L)
+        deviceA.authManager.silentAuthorizationOverride = {
+            deviceA.authManager.persistAccessToken("refreshed-token", "user@example.com")
+            DriveAuthOutcome.Authorized("refreshed-token")
+        }
+        val refreshed = deviceA.authManager.getValidSession()
+        assertNotNull(refreshed)
+        assertEquals("refreshed-token", refreshed!!.accessToken)
     }
 
     @Test

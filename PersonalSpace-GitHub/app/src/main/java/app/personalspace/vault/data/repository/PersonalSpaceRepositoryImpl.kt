@@ -29,6 +29,7 @@ import app.personalspace.vault.data.local.entity.TimelineEventEntity
 import app.personalspace.vault.data.local.preferences.UserPreferencesDataSource
 import app.personalspace.vault.data.reminder.AlarmReminderScheduler
 import app.personalspace.vault.data.reminder.ReminderRecurrenceCalculator
+import app.personalspace.vault.data.reminder.resolveMonthlyAnchorDay
 import app.personalspace.vault.data.sync.BackgroundWorkCoordinator
 import app.personalspace.vault.data.sync.DriveRemoteDataSource
 import app.personalspace.vault.data.sync.GoogleDriveAuthManager
@@ -168,6 +169,13 @@ class PersonalSpaceRepositoryImpl @Inject constructor(
     override fun latestCachedFolders(): List<Folder>? = cachedFoldersList
     override fun latestCachedRecords(): List<RecordItem>? = cachedRecordsList
     override fun latestCachedRecordById(recordId: String): RecordItem? = cachedRecordsById[recordId]
+
+    override fun invalidateCaches() {
+        cachedOverview = null
+        cachedFoldersList = null
+        cachedRecordsList = null
+        cachedRecordsById = emptyMap()
+    }
 
     override suspend fun preloadStartupData() = withContext(Dispatchers.IO) {
         sessionManager.ensureAutoUnlocked()
@@ -1532,6 +1540,8 @@ class PersonalSpaceRepositoryImpl @Inject constructor(
         val db = dbHolder.getDatabase()
         val (deviceId, _) = preferences.getOrCreateDeviceIdentity()
         val now = timeProvider.nowMillis()
+        // A past trigger fires immediately and is then marked MISSED before the user can act on it.
+        require(scheduledAtMillis > now) { "Choose a future date and time for the reminder." }
         val existing = existingReminderId?.let { db.reminderDao().getReminderById(it) }
 
         val entity = if (existing == null) {
@@ -1570,7 +1580,11 @@ class PersonalSpaceRepositoryImpl @Inject constructor(
 
         db.reminderDao().upsert(entity)
         val domainItem = getReminderById(entity.id)!!
-        val exactGranted = reminderScheduler.scheduleReminder(domainItem)
+        // The user explicitly chose this date, so it becomes the new monthly recurrence anchor.
+        val exactGranted = reminderScheduler.scheduleReminder(
+            domainItem,
+            resetRecurrenceAnchor = true
+        )
         domainItem to exactGranted
     }
 
@@ -1579,6 +1593,7 @@ class PersonalSpaceRepositoryImpl @Inject constructor(
         val entity = db.reminderDao().getReminderById(reminderId) ?: return@withContext
         val now = timeProvider.nowMillis()
         val recurrence = RecurrenceType.entries.firstOrNull { it.name == entity.recurrenceType } ?: RecurrenceType.ONCE
+        val anchorDay = resolveMonthlyAnchorDay(db, reminderScheduler, entity, timeProvider.zoneId())
 
         db.withTransaction {
             db.reminderDao().insertOccurrence(
@@ -1595,7 +1610,8 @@ class PersonalSpaceRepositoryImpl @Inject constructor(
                 currentScheduledMillis = entity.scheduledAtMillis,
                 recurrence = recurrence,
                 nowMillis = now,
-                zoneId = timeProvider.zoneId()
+                zoneId = timeProvider.zoneId(),
+                monthlyAnchorDay = anchorDay
             )
             val updated = if (nextScheduled != null) {
                 entity.copy(
@@ -1672,29 +1688,87 @@ class PersonalSpaceRepositoryImpl @Inject constructor(
         val active = db.reminderDao().getAllActiveReminders()
 
         for (r in active) {
-            if (r.status == ReminderStatus.PENDING.name || r.status == ReminderStatus.SNOOZED.name) {
-                val trigger = r.snoozedUntilMillis ?: r.scheduledAtMillis
-                if (trigger + overdueGraceMillis < now) {
-                    db.withTransaction {
-                        db.reminderDao().upsert(
-                            r.copy(
-                                status = ReminderStatus.MISSED.name,
-                                snoozedUntilMillis = null,
-                                modifiedAt = now
-                            )
+            val recurrence = RecurrenceType.entries.firstOrNull { it.name == r.recurrenceType }
+                ?: RecurrenceType.ONCE
+            val anchorDay = resolveMonthlyAnchorDay(db, reminderScheduler, r, timeProvider.zoneId())
+
+            // Older releases permanently killed a recurring series by marking the whole row MISSED.
+            // Revive such rows once without logging another MISSED occurrence.
+            if (r.status == ReminderStatus.MISSED.name && recurrence != RecurrenceType.ONCE) {
+                val revivedAt = ReminderRecurrenceCalculator.computeNextOccurrenceMillis(
+                    currentScheduledMillis = r.scheduledAtMillis,
+                    recurrence = recurrence,
+                    nowMillis = now,
+                    zoneId = timeProvider.zoneId(),
+                    monthlyAnchorDay = anchorDay
+                ) ?: continue
+                db.withTransaction {
+                    db.reminderDao().upsert(
+                        r.copy(
+                            scheduledAtMillis = revivedAt,
+                            status = ReminderStatus.PENDING.name,
+                            snoozedUntilMillis = null,
+                            modifiedAt = now,
+                            syncVersion = r.syncVersion + 1
                         )
-                        db.reminderDao().insertOccurrence(
-                            ReminderOccurrenceEntity(
-                                id = IdGenerator.newUuid(),
-                                reminderId = r.id,
-                                reminderTitle = r.title,
-                                occurrenceScheduledMillis = trigger,
-                                actualHandledMillis = now,
-                                outcome = ReminderStatus.MISSED.name
-                            )
-                        )
-                    }
+                    )
                 }
+                getReminderById(r.id)?.let { reminderScheduler.scheduleReminder(it) }
+                continue
+            }
+
+            if (r.status != ReminderStatus.PENDING.name && r.status != ReminderStatus.SNOOZED.name) continue
+            val trigger = r.snoozedUntilMillis ?: r.scheduledAtMillis
+            if (trigger + overdueGraceMillis >= now) continue
+
+            // A missed OCCURRENCE must not kill a recurring SERIES. Log MISSED, then skip all
+            // overdue periods in one arithmetic jump and keep the next future alarm alive.
+            val nextScheduled = if (recurrence == RecurrenceType.ONCE) {
+                null
+            } else {
+                ReminderRecurrenceCalculator.computeNextOccurrenceMillis(
+                    currentScheduledMillis = r.scheduledAtMillis,
+                    recurrence = recurrence,
+                    nowMillis = now,
+                    zoneId = timeProvider.zoneId(),
+                    monthlyAnchorDay = anchorDay
+                )
+            }
+
+            db.withTransaction {
+                db.reminderDao().insertOccurrence(
+                    ReminderOccurrenceEntity(
+                        id = IdGenerator.newUuid(),
+                        reminderId = r.id,
+                        reminderTitle = r.title,
+                        occurrenceScheduledMillis = trigger,
+                        actualHandledMillis = now,
+                        outcome = ReminderStatus.MISSED.name
+                    )
+                )
+                val updated = if (nextScheduled != null) {
+                    r.copy(
+                        scheduledAtMillis = nextScheduled,
+                        status = ReminderStatus.PENDING.name,
+                        snoozedUntilMillis = null,
+                        modifiedAt = now,
+                        syncVersion = r.syncVersion + 1
+                    )
+                } else {
+                    r.copy(
+                        status = ReminderStatus.MISSED.name,
+                        snoozedUntilMillis = null,
+                        modifiedAt = now,
+                        syncVersion = r.syncVersion + 1
+                    )
+                }
+                db.reminderDao().upsert(updated)
+            }
+
+            if (nextScheduled != null) {
+                getReminderById(r.id)?.let { reminderScheduler.scheduleReminder(it) }
+            } else {
+                reminderScheduler.cancelReminder(r.id)
             }
         }
     }
@@ -2089,7 +2163,7 @@ class PersonalSpaceRepositoryImpl @Inject constructor(
         }
 
     override suspend fun uploadManualBackupToDrive(): BackupHistoryItem = withContext(Dispatchers.IO) {
-        val session = authManager.getCurrentSession()
+        val session = authManager.getValidSession()
             ?: throw IllegalStateException("Google Drive is not connected. Connect Drive first in Settings.")
         val created = backupManager.createFullBackupFile(BackupKind.FULL_MANUAL, recordHistoryInDb = false)
         val now = timeProvider.nowMillis()
@@ -2140,8 +2214,8 @@ class PersonalSpaceRepositoryImpl @Inject constructor(
         true
     }
 
-    private fun requireDriveToken(): String {
-        val session = authManager.getCurrentSession()
+    private suspend fun requireDriveToken(): String {
+        val session = authManager.getValidSession()
             ?: throw IllegalStateException("Google Drive is not connected. Connect Drive first in Settings.")
         return session.accessToken
     }
@@ -2171,10 +2245,12 @@ class PersonalSpaceRepositoryImpl @Inject constructor(
             val temp = backupManager.newRestoreTempFile()
             try {
                 remoteDataSource.downloadEncryptedFile(token, fileId, temp)
-                backupManager.restoreFromBackupFile(
+                val result = backupManager.restoreFromBackupFile(
                     backupFile = temp,
                     recoveryPassword = recoveryPassword?.copyOf()
                 )
+                invalidateCaches()
+                result
             } finally {
                 temp.delete()
                 recoveryPassword?.fill('\u0000')
